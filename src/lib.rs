@@ -52,14 +52,6 @@
 //! `ra_buffer_anchor(buffer1 = [0u8; 1024] for OperationInteraction);`
 //!
 
-
-/// TODO: Fundamental Problems with Pin + AsyncDrop
-///   1. start AsyncDrop
-///   2. while AsyncDrop stop polling and Drop future
-///   3. we MUST NOT leak the partially dropped type as
-///      it's potentially on the (future) stack which we else
-///      wise do drop (and then potentially re-purpose)
-
 use std::{marker::PhantomData, mem, pin::Pin, ptr, task::Context, task::Poll};
 
 use mem::ManuallyDrop;
@@ -112,6 +104,8 @@ pub unsafe trait OperationInteraction {
     /// As many operations do not support cancellation this has a
     /// default implementation which instantly completes.
     ///
+    /// # Extended poll guarantees.
+    ///
     /// A implementor must guarantee that polling this *even after
     /// poll returned `Ready`* doesn't panic. Wrt. this this differs
     /// from a classical poll.
@@ -136,10 +130,6 @@ pub unsafe trait OperationInteraction {
     /// 1. We might never poll it (in case of `Drop`'ing the anchor).
     /// 2. We might only poll it once we hope/expect it to be roughly done.
     ///
-    //TODO: Consider returning a result?
-    //TODO: I don't think we need to guarantee poll after completion to be ok for
-    //      this as any poll on it will normally directly go into cleanup after
-    //      it completes.
     fn poll_completion(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()>;
 
 }
@@ -207,8 +197,20 @@ where
     OpInt: OperationInteraction  + 'a
 {
 
+    /// Create a new instance with given buffer.
+    ///
     /// # Unsafe-Contract
     ///
+    /// TODO explain why it works and what is needed
+    ///
+    /// - In practice: you *must* `Pin` the returned instance to the stack
+    /// - This the returned instance is pinned this pin extends to the buffer passed in.
+    ///   (WAIT WE DON'T need to extend the Pin to the buffer!!)
+    /// - WAIT the buffer doesn't need to be on the stack or the same stack scope
+    ///   in all cases (it matters for the fully leak boxed future case with a non 'static
+    ///   box where the ref comes from the outside).
+    /// - WAIT if we guarantee the buffer to be on the stack just above we don't need to
+    ///   carry it's lifetime around.
     /// TODO TODO TODO TODO (require pin on stack etc.)
     pub unsafe fn new_unchecked(buffer: &'a mut [V]) -> Self {
         RABufferAnchor {
