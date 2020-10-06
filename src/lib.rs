@@ -220,6 +220,42 @@ where
         }
     }
 
+
+    /// Returns a mut reference to the underling buffer.
+    ///
+    /// If a operations is currently in process it first awaits the end of the operation.
+    ///
+    /// This will not try to cancel any ongoing operation. If you need that you
+    /// should await [`RABuffer::notify_cancellation_intend()`] before caling this
+    /// method.
+    pub async fn buffer_mut(mut self: Pin<&mut Self>) -> &mut [V] {
+        self.as_mut().completion().await;
+        // Safe: We have a (pinned) &mut borrow to the anchor and we made
+        //       sure it's completed (completion always calls `cleanup_operation`).
+        unsafe {
+            let (ptr, len) = self.get_unchecked_mut().buffer;
+            std::slice::from_raw_parts_mut(ptr, len)
+        }
+    }
+
+    /// Returns a reference to the underling buffer.
+    ///
+    /// If a operations is currently in process it first awaits the end of the operation.
+    ///
+    /// This will not try to cancel any ongoing operation. If you need that you
+    /// should await [`RABuffer::notify_cancellation_intend()`] before caling this
+    /// method.
+    pub async fn buffer_ref(mut self: Pin<&mut Self>) -> &[V] {
+        self.as_mut().completion().await;
+        // Safe: We have a (pinned) &mut borrow to the anchor and we made
+        //       sure it's completed (completion always calls `cleanup_operation`).
+        unsafe {
+            let (ptr, len) = self.get_unchecked_mut().buffer;
+            std::slice::from_raw_parts(ptr, len)
+        }
+    }
+
+
     /// Return a pointer to the start of the the underlying buffer and it's size.
     ///
     ///
@@ -318,6 +354,9 @@ where
         if let Some(mut op_int) = self.as_mut().get_pin_to_op_int() {
             futures_lite::future::poll_fn(|ctx| op_int.as_mut().poll_completion(ctx)).await;
         }
+        //WARNING: Some other internal methods might rely on completion always calling
+        //         `self.cleanup_operation()` at the end! So don't remove it it might
+        //         brake the unsafe-contract.
         self.cleanup_operation();
     }
 
@@ -733,6 +772,36 @@ mod tests {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.as_mut()).await;
                 buffer.cancellation().await;
+                mock.assert_was_dropped();
+            }
+        }
+
+        mod buffer_mut {
+            use super::super::super::*;
+            use super::super::mock_operation::*;
+
+            #[async_std::test]
+            async fn buffer_access_awaits_completion() {
+                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                let (_, mock) = mock_operation(buffer.as_mut()).await;
+                let mut_ref = buffer.buffer_mut().await;
+                assert_eq!(mut_ref, &mut [0u8; 32] as &mut [u8]);
+                mock.assert_completion_run();
+                mock.assert_was_dropped();
+            }
+        }
+
+        mod buffer_ref {
+            use super::super::super::*;
+            use super::super::mock_operation::*;
+
+            #[async_std::test]
+            async fn buffer_access_awaits_completion() {
+                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                let (_, mock) = mock_operation(buffer.as_mut()).await;
+                let a_ref = buffer.buffer_ref().await;
+                assert_eq!(a_ref, &[0u8; 32] as &[u8]);
+                mock.assert_completion_run();
                 mock.assert_was_dropped();
             }
         }
