@@ -474,8 +474,8 @@ where
 
 #[macro_export]
 macro_rules! ra_buffer_anchor {
-    ($name:ident = [0u8; $len:literal] of $OpInt:ty) => (
-        let mut $name = [0u8; $len];
+    ($name:ident = [$init:literal; $len:literal] of $OpInt:ty) => (
+        let mut $name = [$init; $len];
         let mut $name = unsafe { RABufferAnchor::<_, $OpInt>::new_unchecked(&mut $name) };
         // Yirks lifetime folding prevents drop
         let mut $name = unsafe { Pin::new_unchecked(&mut $name) };
@@ -782,10 +782,10 @@ mod tests {
 
             #[async_std::test]
             async fn buffer_access_awaits_completion() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer_anchor!(buffer = [12u32; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.as_mut()).await;
                 let mut_ref = buffer.buffer_mut().await;
-                assert_eq!(mut_ref, &mut [0u8; 32] as &mut [u8]);
+                assert_eq!(mut_ref, &mut [12u32; 32] as &mut [u32]);
                 mock.assert_completion_run();
                 mock.assert_was_dropped();
             }
@@ -797,10 +797,10 @@ mod tests {
 
             #[async_std::test]
             async fn buffer_access_awaits_completion() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer_anchor!(buffer = [12u32; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.as_mut()).await;
                 let a_ref = buffer.buffer_ref().await;
-                assert_eq!(a_ref, &[0u8; 32] as &[u8]);
+                assert_eq!(a_ref, &[12u32; 32] as &[u32]);
                 mock.assert_completion_run();
                 mock.assert_was_dropped();
             }
