@@ -470,10 +470,10 @@
 //!
 //!
 
-use std::{marker::PhantomData, mem, pin::Pin, ptr, task::Context, task::Poll};
+mod utils;
 
-use mem::ManuallyDrop;
-
+use std::{marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, task::Context, task::Poll};
+use crate::utils::abort_on_panic;
 /// Trait for type allowing interaction with an ongoing operation
 ///
 /// # Unsafe-Contract
@@ -839,7 +839,7 @@ where
     /// are some supper rare edge cases where exposing it is use-full.
     pub fn cleanup_operation(mut self: Pin<&mut Self>) {
         if let Some(mut opt_int) = self.as_mut().operation_interaction() {
-            opt_int.as_mut().make_sure_operation_ended();
+            abort_on_panic(|| opt_int.as_mut().make_sure_operation_ended());
             // Safe:
             //   1. We called `make_sure_operation_ended`.
             //   2. We drop it in-place without moving it.
@@ -929,8 +929,10 @@ mod tests {
     mod mock_operation;
 
     mod usage_patterns {
+        use std::mem;
         use super::super::*;
         use super::mock_operation::*;
+
         #[async_std::test]
         async fn leaked_operations_get_canceled_and_ended_before_new_operations() {
             let mi = async {
