@@ -763,8 +763,10 @@ where
         self.get_ref().operation_interaction.is_some()
     }
 
-    /// Returns a pint into the `Option::Some` of the  `operation_interaction` field.
-    fn get_pin_to_op_int(self: Pin<&mut Self>) -> Option<Pin<&mut OpInt>> {
+    /// Projection allowing access to the internally stored [`OperationInteraction`] instance.
+    ///
+    /// Returns `None` if there is no ongoing interaction.
+    pub fn operation_interaction(self: Pin<&mut Self>) -> Option<Pin<&mut OpInt>> {
         // SAFE: Due to the special guarantees we give to the operation_interaction
         //       field it is safe to create a `Option<Pin<&mut OpInt>>` from it.
         //       Through we need to give some guarantees around it like we must not
@@ -786,7 +788,7 @@ where
     /// Calling this directly is only possible if the `OperationHandle`
     /// has been leaked or detached.
     pub async fn notify_cancellation_intend(self: Pin<&mut Self>) {
-        if let Some(mut op_int) = self.get_pin_to_op_int() {
+        if let Some(mut op_int) = self.operation_interaction() {
             futures_lite::future::poll_fn(|ctx| op_int.as_mut().poll_cancel(ctx)).await;
         }
     }
@@ -801,7 +803,7 @@ where
     /// Calling this directly is only possible if the `OperationHandle`
     /// has been leaked or detached.ge).
     pub async fn completion(mut self: Pin<&mut Self>) {
-        if let Some(mut op_int) = self.as_mut().get_pin_to_op_int() {
+        if let Some(mut op_int) = self.as_mut().operation_interaction() {
             futures_lite::future::poll_fn(|ctx| op_int.as_mut().poll_completion(ctx)).await;
         }
         //WARNING: Some other internal methods might rely on completion always calling
@@ -836,7 +838,7 @@ where
     /// through `completion().await` or `cancellation().await`. Through there
     /// are some supper rare edge cases where exposing it is use-full.
     pub fn cleanup_operation(mut self: Pin<&mut Self>) {
-        if let Some(mut opt_int) = self.as_mut().get_pin_to_op_int() {
+        if let Some(mut opt_int) = self.as_mut().operation_interaction() {
             opt_int.as_mut().make_sure_operation_ended();
             // Safe:
             //   1. We called `make_sure_operation_ended`.
@@ -1063,7 +1065,7 @@ mod tests {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
                 let (_op, mock) = mock_operation(buffer.as_mut()).await;
                 let op_int_addr = buffer.as_mut()
-                    .get_pin_to_op_int()
+                    .operation_interaction()
                     .map(|pin| pin.get_mut() as *mut _)
                     .unwrap();
                 buffer.as_mut().cleanup_operation();
@@ -1075,7 +1077,7 @@ mod tests {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
                 let (_op, mock) = mock_operation(buffer.as_mut()).await;
                 let op_int_addr = buffer.as_mut()
-                    .get_pin_to_op_int()
+                    .operation_interaction()
                     .map(|pin| pin.get_mut() as *mut _)
                     .unwrap();
                 buffer.as_mut().cleanup_operation();
