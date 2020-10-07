@@ -20,7 +20,7 @@ pub async fn mock_operation<'r, 'a, T>(mut buffer: Pin<&'r mut RABufferAnchor<'a
     let (buffer_start, len) = buffer.as_mut().get_slice_start_ptr_and_len_unchecked();
     let (op_int, start, mock_info) = OpIntMock::new(buffer_start, len);
     // Safe: We pass in the right opt_int (well as we don't actually access the buffer it kinda doesn't matter)
-    let op_handle = unsafe { buffer.try_set_new_operation_interaction(op_int) };
+    let op_handle = unsafe { buffer.try_register_new_operation(op_int) };
     // Unwrap Safe: We awaited completion
     let op_handle = op_handle.unwrap();
     // we don't do really start anything here but if you do implement a real operation

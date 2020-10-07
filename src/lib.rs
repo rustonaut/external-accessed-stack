@@ -1,55 +1,450 @@
+//! This library provides a way to have a stack allocated buffer which can be
+//! use by completion based I/O like DMA, io-uring.
 //!
-//! # Design Idea
+//! This library is focused on the async/await use-case of such a buffer,
+//! a similar library like this could be written for blocking use cases.
 //!
-//! 1. Pin can gives us a drop guarantee that the pinned memory is not re-purposed without
-//!    calling drop in the pinned type.
-//! 2. For anything on the stack this implies`?Leak` as the stack shrinking/growing repurposed
-//!    memory.
-//! 3. But we don't need `?Leak` on just he buffer but also a type which owns/control the buffer
-//!    and manage the DMA (or similar).
-//! 4. So something like `struct DMABuffer { dma_manager: DMAManager, dma_buffer: [u8] }` would
-//!    be what we would want to pin. Problem is that we can't but variable sized struct's on the
-//!    stack. Even with the unstable nightly feature we can not create a variable sized struct on
-//!    the stack only variable length arrays and moving other variable sized types onto the stack
-//!    (but we can work around it by having a [u8] VLA which we retype + to DMABuffer)
-//! 5. Alternatively we could have a `struct DMABuffer<const LEN: usize>` but not only means this
-//!    const buffer length but also const generics are as far as I can tell far from stable or
-//!    properly working.
-//! 6. So the new idea is we create a anchor which has a reference to a buffer and we will pin
-//!    that anchor and through the unsafe constructor of the anchor we will extend the pinning
-//!    to the buffer.
-//!    - As a safe abstraction we will have a macro which makes sure to stack allocate the buffer in
-//!      the same stack scope as the anchor and shadow it. With that we should be able to treat
-//!      the buffer and other data as if pinned together.
-//!    - Due to the Pin on stack guarantees we know the destructor will run before the stack is freed and
-//!      the stack memory is potentially repurposed.
-//!    - With that we can use the `RABufferAnchor`'s `Drop` implementation to make sure to halt destruction
-//!      until DMA stopped and as such prevent stack clobbering.
-//!    - We can have 2 APIs one which consumes the RABufferHandle and gives it back once the operation completes
-//!      but in that case it can be a bit annoying to have to propagate the handles back up. The other is
-//!      borrow based but in this case leaking the operation allows restarting a new operation before the
-//!      old operation completes so magic is needed to handle that. (move a way to cancle into the pinned
-//!      anchor)
+//! This library is `#[no_std]` compatible, it doesn't need alloc.
 //!
+//! While completion based (or other "external" I/O) operations can be
+//! done with this buffer for each API it's meant to be used with some
+//! glue code is necessary. The main idea is that safe abstractions around
+//! such API's might support this buffer from out of the box maybe even
+//! use it as a fundamental component. But if not it normally can be
+//! adapted to work with such APIs.
 //!
+//! # Example
 //!
-//! ### Handling the Operation Feedback
+//! TODO
 //!
-//! For the borrow based API we need to store data in the anchor which can help us to await
-//! if the operation has ended, to trigger the operation to cancel and to have a blocking
-//! way to wait for the end of the operation and potentially cancel it on the way.
+//! # Recommendation
 //!
-//! For the `std` use-case this isn't to bad as we can have a `Box<dyn Trait>`.
+//! - `Pin<&mut RABufferAnchor<...>>` mostly works like a `&mut` but sadly
+//!   doesn't automatically re-borrow. So e.g. calling `method(buffer); method(buffer);`
+//!   doesn't work as `buffer` is moved into `method`. To get re-borrowing
+//!   behavior like for a `&mut` you can use `.as_mut()`. E.g.
+//!   `method(buffer.as_mut()); method(buffer.as_mut());`.
+//!   Sadly that also means that for most methods on it you will use `.as_mut()`.
+//!   E.g. `buffer.as_mut().completion().await`. Which is a bit annoying but
+//!   currently a limitation of rust.
 //!
-//! For the `non-std` use-case this is a bit more tricky as we don't want to have a `Box`.
-//! So instead we need a well-know access method specific type *and* make the buffer specific
-//! to the access method used. Depending on what we are working with awaiting completion
-//! can also be very async-runtime specific as it might need a "await from interrupt" or
-//! similar.
+//! - Given that there is currently no async destructor it is recommended
+//!   to do a `buffer.completion().await` (or `cancellation()`) at the
+//!   end of the stack frame you created the anchor on (e.g. at the
+//!   end of the function you called `ra_buffer_anchor!(..)`) to
+//!   prevent any unnecessary blocking during drop in the case where
+//!   there is still a ongoing operation.
 //!
-//! So we need following instead:
+//! # Principle (short/TL;DR)
 //!
-//! `ra_buffer_anchor(buffer1 = [0u8; 1024] for OperationInteraction);`
+//! Due to the way `Pin` works and the unsafe contract of the buffer
+//! constructor we can be assured that `Drop` of the anchor is called
+//! before the memory of the buffer is potentially re-purposed (including
+//! freeing it).
+//!
+//! We provide ways to properly await the completion of a operation.
+//!
+//! We always implicitly await the completion of an operation before
+//! (semantically) reclaiming the ownership of the stack buffer.
+//!
+//! So e.g. [`RABufferAnchor.buffer_mut()`] hands out a `&mut [V]`
+//! to the underlying buffer but first will await that any ongoing
+//! operation completed.
+//!
+//! Once `Drop` is called we make sure to block until any ongoing operation
+//! ended to assure that an external operation never accesses the then
+//! potentially re-purposed (or just freed) memory.
+//!
+//! # Principle (full)
+//!
+//! ## Terminology
+//!
+//! - *stack frame*: A bit of memory allocated with a function call and
+//!   freed with the end of the function call. Rust guarantees that all
+//!   values stored on the stack are dropped before the stack is freed.
+//!   There are no exceptions, but some contains might prevent their inner
+//!   values from being dropped like e.g. `ManuallyDrop` or a custom `LeakyBox`
+//!   type which acts like a box which leaks it's value on `Drop`. You can't
+//!   really leak the normal stack.
+//!
+//! - *stack frame*: A stack frame in a "normal" function which used
+//!   the "normal" stack allocation/free mechanism.
+//!
+//! - *async stack frame*: A stack frame a `async` function, due to the transformation
+//!   done by async this isn't necessary mapping to a "normal" stack frame instead all
+//!   stack allocated values which live across a (potential) `.await` call will be
+//!   allocated inside of the pinned future which `async` turned the function into.
+//!   This future might lay on the "normal" stack, the heap (`Pin<Box<...>>`) or it
+//!   might be inside another future which awaited this future directly. In difference
+//!   to the normal stack frame a *async stack frame* can be leaked, but only if it
+//!   is on the heap (see below). Besides that the guarantees are roughly the same.
+//!   I.e. all values are guaranteed to get dropped before the stack if freed, this
+//!   is possible as dropping the future will drop all values currently inside of the
+//!   pinned future.
+//!
+//! ## Relevant workings of Pin and async/await
+//!
+//! The main guarantee `Pin<&mut T>` gives you is that `T` is "pinned" in memory,
+//! i.e. it will not be moved around. While this is important for our use-case
+//! we also heavily rely on the "drop guarantee" `Pin` gives us. To quote:
+//!
+//! > for pinned data you have to maintain the invariant that its memory will not
+//! > get *invalidated* or *repurposed* from the moment it gets pinned until when drop
+//! > is called. Only once drop returns or panics, the memory may be reused.
+//!
+//! The means that you can not free the memory a value was pinned to without
+//! dropping the value. Neither can you *repurpose* the memory.
+//!
+//! This mean that if you pin a value to a stack frame (weather async or not) you
+//! must either not leak the value or leak the whole stack frame (which isn't possible
+//! for normal stacks frames, but is possible for values pinned to a async stack frame
+//! where the async transformation moves them into the future and the future is pinned
+//! on the heap e.g. with `Pin<Box<...>>`).
+//!
+//! It is important that while that is a unsafe-contract which needs to be uphold by the
+//! user of `Pin` futures are made so that the contract will be uphold. Or else we would
+//! not be able to use them at all.
+//!
+//! ## How this library is safe.
+//!
+//! This library requires a anchor to be pinned onto a (potentially async) stack frame.
+//! Furthermore the buffer the anchors anchors must uphold certain guarantees (see below),
+//! which are most easily fulfilled by placing the buffer directly onto the stack above
+//! the anchor.
+//!
+//! Furthermore it requires the anchor to only be accessible through the the `Pin`. (This
+//! is best done the same way `pin_utils::pin_mut!` works.)
+//!
+//! With that we can guarantee that either both the anchor and buffer leak together which
+//! means the buffer will not be repurposed or the anchors destructor is run before there
+//! is any chance of the buffer being repurposed.
+//!
+//! By blocking in the destructor until any operation on the buffer completes we can prevent
+//! the buffers memory from being re-purposed without the operation concluding. Which in turn
+//! can make it safe to use the buffer with completion based I/O like e.g. DMA.
+//!
+//! To explain this better lets look at following code as if produced by the
+//! `ra_buffer_anchor!(buffer = [0u8; 32] of DMAInteraction)` code:
+//!
+//! ```no_run
+//! # use std::{pin::Pin, task::{Context, Poll}};
+//! # use remote_accessed_buffer::{OperationInteraction, RABufferAnchor};
+//! # struct DMAInteraction;
+//! # unsafe impl OperationInteraction for DMAInteraction {
+//! #   fn make_sure_operation_ended(self: Pin<&mut Self>) { todo!() }
+//! #   fn poll_cancel(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> { todo!() }
+//! #   fn poll_completion(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> { todo!() }
+//! # }
+//! let mut buffer = [0u8; 32];
+//! // SAFE:
+//! // 1. We can use the buffer as it's directly on the stack above the anchor
+//! // 2. We directly pin the anchor to the stack as it's required.
+//! let mut buffer = unsafe { RABufferAnchor::<_, DMAInteraction>::new_unchecked(&mut buffer) };
+//! // SAFE:
+//! // 1. Works like `pin_mut!` we shadow the same stack allocated buffer to prevent any non-pinned
+//! //    access to it.
+//! let mut buffer = unsafe { Pin::new_unchecked(&mut buffer) };
+//! ```
+//!
+//! Here by having the array buffer on the same stack as the anchor and making the buffer
+//! out-life the anchor (it's on the stack "above" the buffer) we know that either we will
+//! leak both the buffer and the anchor (which is ok) or the anchor will be dropped be the
+//! buffer can maybe be accessed again (in this case it can not!).
+//!
+//! Semantically seen the anchor takes ownership of the buffer until it's dropped.
+//!
+//! Furthermore by shadowing the anchor with it's pin we make sure it's impossible to
+//! access the anchor through anything but the `Pin`. If we would not have shadowed it
+//! we would need to manually guarantee that it's not accessed which is just realy anoying
+//! to do and error prone. Note that this aspects works exactly the same as `pin_mut!`.
+//! I literally could have replaced the last line with `pin_mut!(buffer)` having one
+//! unsafe line less in my code (but instead in `pin_mut!`). But for demonstration
+//! purpose and readability writing it out by hand is better, here.
+//!
+//! Now one think which should be mentioned is that needing to wait for completion in
+//! `Drop::drop` is not the best thing to do. We can not get around it but having something
+//! like a `AsyncDropPreperation` trait which automatically does something like a async
+//! drop before the drop would be supper helpful (a `AsyncDrop` which replaces `Drop` can't
+//! really work as far as I know).
+//!
+//! Because of this it's strongly recommended to make sure that under normal circumstances
+//! `buffer.completion().await` or `buffer.cancellation().await` is run before dropping it.
+//!
+//! ## How is it safe to drop the `OperationHandle`?
+//!
+//! If a operation started a `OperationInteraction` instance is registered on the buffer.
+//! This instance can be used to check if the operation ended.
+//!
+//! This instance is *not* placed in the `OperationHandle` returned. Instead it is placed
+//! "upstram" in the pinned anchor. This mean we can guarantee to have access to it until
+//! we explicitly remove it because we realized the operation ended.
+//!
+//! The `OperationHandle` just wraps the used `Pin<&mut RABufferAnchor<...>>` to have a
+//! way to encode that fact that there is a ongoing operation in the type system.
+//!
+//! You can always drop the `OperationHandle` handle which will literally have no affect
+//! on the operation itself.
+//!
+//! The reason for this is that we anyway can access the `Pin<&mut RABufferAnchor<...>>`
+//! while a operation is going on using re-borrows + (safe) leaking. In the end awaiting
+//! completion/cancellation on the `OperationHandle` just forwards it the the same named
+//! methods on `RABufferAnchor`!
+//!
+//! ## How do we make sure that an operation can't override another?
+//!
+//! The method used by API's which start operations which this buffer fails if
+//! there is a ongoing operations.
+//!
+//! It's generally recommended that such methods await `completion` or `cancellation`
+//! of any ongoing operation first before starting a new one. Doing so while there is
+//! no ongoing operation is basically `Noop` (as single `option.is_some()` call).
+//!
+//! ## How can we access the buffer safely outside of operations?
+//!
+//! There are two methods [`RABufferAnchor.buffer_mut()`] and [`RABufferAnchor.buffer_ref()`]
+//! which return a `&mut [V]`/`&[V]` after awaiting completion of any still ongoing
+//! operation.
+//!
+//! ## Guarantees for the passed in buffer
+//!
+//! Before we slightly glossed over the guarantees a buffer passed in to
+//! [`RABufferAnchor.new_unchecked()`] must give, *because it's strongly
+//! recommended to always place it direct above the anchor on the same
+//! stack*.
+//!
+//! The unsafe-contract rule is:
+//!
+//! - You can pass any buffer in where you guarantee that it only can be re-purposed
+//!   after the anchor is dropped and that if the anchor is leaked the buffer is
+//!   guaranteed to be leaked, too.
+//!
+//! But this can be tricky to get right for anything but the most simple use
+//! case where you place the buffer directly on the stack above the anchor which
+//! then is directly pinned there.
+//!
+//! For more complex use case consider following rules:
+//!
+//! - You don't need to place the buffer directly on the stack, placing
+//!   a owner is enough for this. This can be e.g. a `Box<[V]>`,
+//!   `Vec<V>` or even a `MutexGuard<[V]>` it's only important that it owns
+//!   the buffer. We do not give out any drop guarantees for the buffer anyway,
+//!   as we semantically "send" the buffer to the operation and receive it back
+//!   once it's completed.
+//!
+//! - The buffer owner isn't required to be placed on the same stack frame. But it
+//!   must be placed on the same or a parent stack frame and the same or a parent
+//!   future. If and only if the future is pinned onto a normal stack the same or
+//!   parent stack frame extends from inside the async stack to the outside as the
+//!   async stack (or at leas the relevant parts) are part of the "normal" stack
+//!   on the outside they are placed on.
+//!
+//! This means you could have something crazy like:
+//!
+//! ```ignore
+//! // sync stack frame
+//!
+//! // reuseable_buffer ~: Arc<Mutext<[u8]>>
+//! let mut buffer = reusable_buffer.lock();
+//! let future = async {
+//!     // Safe:
+//!     // 1. We do guarantee buffer to be on the same stack frame
+//!     //    (due to how we pin the future to the outside stack on which also the buffer is).
+//!     // 2. We shadow and pin it afterwards
+//!     let buffer = unsafe { RABufferAnchor::<_, DMAInteraction>::new_unchecked(&mut buffer); };
+//!     pin_mut!(buffer)
+//!     do_some_dma_magic(buffer.as_mut()).await;
+//!     // make sure we properly await any pending operation aboves method might not have
+//!     // awaited the completion on, so that we don't block on drop (through that kinda doesn't
+//!     // matter in this example).
+//!     buffer.completion().await
+//! };
+//! pin_mut!(future)
+//! let result = block_on_pin(future);
+//! ```
+//!
+//! While aboves example is fully fine, *it's strongly recommended to not do so*. As it's very
+//! prone to introducing unsafe-contract breaches. E.g. just changing the last two lines to
+//! `smol::block_on(future)` would brake the unsafe-contract as it no longer guarantees that
+//! the buffer is on the same or an parent stack of the anchor.
+//!
+//! ## Implementing Operations with this buffer
+//!
+//! This section contains some information for API implementers which do want to use this buffer.
+//!
+//! - The [`RABufferAnchor.try_register_new_operation()`] method can be used to register a new operation.
+//!
+//! - As it will fail if there is still a ongoing operation ist recommended that the method calling register
+//!   does a `buffer.as_mut().cancellation().await`.  In some special cases a `buffer.as_mut().completion().await`
+//!   can be appropriate to. But generally starting a new operation should cancel ongoing operations which have
+//!   not yet been completed if possible. Only the [`RABufferAnchor.buffer_mut()`] and [`RABufferAnchor.buffer_ref()`]
+//!   methods should to a implicit awaiting of completion (Which they do as there behavior is not generic.)
+//!
+//! - A operation must only start *after* [`RABufferAnchor.try_register_new_operation()`] returned successfully.
+//!
+//! - Semantically the ownership of the buffer is passed to whatever executes the operation until it completes.
+//!   This is also why the anchor stores a pointer instead of a reference to the buffer.
+//!
+//! - To make it easier to build operations the [`RABufferAnchor.get_slice_start_ptr_and_len_unchecked()`] methods
+//!   can be called *before* starting a new operation. **But the returned ptr MUST NOT be dereferenced before
+//!   the operation starts.**. Even if you just created a reference but don't use it it's already a violation
+//!   of the unsafe contract (this is necessary due to how compliers treat references wrt. optimizations).
+//!
+//! - The `OperationInteraction` instance is a arbitrary `Sized` type which implements `OperationInteraction`
+//!   and as such is used to poll/await/sync await completion of the operation and/or notify that the operation
+//!   should be canceled.
+//!
+//! - The passed in [`OperationInteraction`] instance is semantically pinned, this means it will not be moved
+//!   until it's dropped. Furthermore it is guaranteed that [`OperationInteraction.make_sure_operation_ended()`]
+//!   is called before dropping it. By combining this knowledge with a (unsafe) cell or some other type having
+//!   internal mutability it's possible to pass pointers *into* the `OperationInteraction` instance to whatever
+//!   does execute the operation. For mor details see below. Be *warned* that to do something like this you
+//!   **always** need interior mutability as we do use `Pin<&mut OpInt>` references.
+//!
+//! - The [`RABufferAnchor.operation_interaction()`] method can be used to get a pinned borrow to the current
+//!   operation interaction.
+//!
+//! - The operation interaction instance is *not* static but must outlive the anchor. (FIXME: And I think due to
+//!   implementation details the buffer, too? At least for now.). This means something like a `&mut Channel`
+//!   singleton instance describing a DMA channel should be able to be passed into the operation as part of
+//!   the [`OperationInteraction`] instance.
+//!
+//! - Whatever is used to implement an operation should make sure that it *does not leak it's way to notify
+//!   that the operation completed*. Because if it does we have the problem that we either will have a permanently
+//!   pending future or a permanently hanging `drop` method. Which both are really really bad. (This is the
+//!   price for temporary handing out ownership of stack allocated buffers).
+//!
+//! Below is the **pseudo-code** of how a function starting a DMA transfer might look:
+//!
+//! FIXME: Test that pseudo code in a integration test.
+//!
+//! ```ignore
+//! // call like `start_dma_operation(buffer.as_mut(), Direction::FromMemory, Periphery::FooBarDataPort).await;`
+//! // FIXME lifetimes could have better out-life relationships.
+//! // FIXME without a way to move the channel&target back out this API sucks kinda ESPECIALLY with
+//! //       the lifetime constraint but this will be solved soon.
+//! async fn start_dma_operation<'r, 'a, T>(
+//!     mut buffer: Pin<&'r mut RABufferAnchor<'a, T::Word, DMAInteraction>>,
+//!     direction: Direction,
+//!     channel: &'a mut C, //the lifetime sucks bad time, we will fix that in newer version
+//!     target: &'a mut T
+//! ) -> OperationHandle
+//! where
+//!     T: dma::Target + 'a,
+//!     C: dma::Channel + 'a
+//! {
+//!     buffer.cancellation().await;
+//!     let (ptr, len) = buffer.as_mut().get_slice_start_ptr_and_len();
+//!     let interaction = DMAInteraction::new(ptr, len, channel, target);
+//!     // Safe: We register the right interaction.
+//!     let operation_handle = unsafe { buffer.as_mut().try_register_new_operation(interaction) };
+//!     // SAFE(unwrap): We made sure the operation ended by polling cancellation
+//!     let mut operation_handle = operation_handle.unwrap();
+//!     let op_int = operation_handle.as_mut().operation_interaction()
+//!     // SAFE: We must only call `start` once before it started.
+//!     unsafe { op_int.start() };
+//!     operation_handle
+//! }
+//! ```
+//!
+//! With `DMAInteraction` being something along the line of following **pseudo-code**:
+//!
+//! ```ignore
+//! struct DMAInteraction<'a, C, T>
+//! where
+//!     // The Unpin is NOT NECESSARY it just makes the pseudo-code simpler
+//!     C: dma::Channel + Unpin + 'a,
+//!     T: dma::Target + Unpin + 'a
+//! {
+//!     ptr: *mut T::Word,
+//!     len: usize,
+//!     channel: &'a mut C,
+//!     target: &'a mut T,
+//! }
+//!
+//! impl<'a, C, T> DMAInteraction<'a, C, T>
+//! where
+//!     C: dma::Channel + Unpin + 'a,
+//!     T: dma::Target + Unpin + 'a,
+//! {
+//!     fn new(ptr: *mut T::Word, len: usize, channel: &'a mut C, target: &'a mut T) -> Self {
+//!         Self { ptr, len, channel, target }
+//!     }
+//!
+//!     unsafe fn start(self: Pin<&mut Self>) {
+//!         let self_ = self.get_mut();
+//!         self_.target.enable_dma();
+//!         let channel = &mut self._channel;
+//!         channel.reset();
+//!         channel.set_periphery(&mut *self_.target);
+//!         channel.set_memory_address(as_address(ptr));
+//!         channel.set_transfer_length(len);
+//!         channel.set_word_size(T::Word::size());
+//!         channel.enable();
+//!     }
+//!
+//!     fn is_completed(&mut self) -> bool {
+//!         self_.event_occurred(Event::Completed) || self_.event_ocurred(Event::Failed)
+//!     }
+//! }
+//!
+//! impl<'a, C, T> OperationInteraction for DMAInteraction<'a, C, T>
+//! where
+//!     C: dma::Channel + Unpin + 'a,
+//!     T: dma::Target + Unpin + 'a,
+//! {
+//!     fn make_sure_operation_ended(self: Pin<&mut Self>) {
+//!         let self_ = self.get_mut(); // or p
+//!         while !self_.is_completed() {
+//!             spin_loop_hint()
+//!             //or thread::yield()
+//!         }
+//!
+//!         //TODO we could "clear" events here or reset the channel.
+//!         //TODO instead of `&'a mut C/T` we could pass them in and
+//!         //     "magically" move them out at this palace.
+//!     }
+//!
+//!     fn poll_cancel(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<()> {
+//!         let self_ = self.get_mut();
+//!         if self_.channel.is_enabled() {
+//!             self_.channel.disable();
+//!         }
+//!     }
+//!
+//!     // There are better ways to do this (using interrupts + wakers) but for this
+//!     // example this is enough.
+//!     fn poll_completion(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+//!         let self_ = self.get_mut();
+//!         if self_.is_completed() {
+//!             Poll::Ready(())
+//!         } else {
+//!             // We don't wake from external source (e.g. interrupt) so we need to
+//!             // waker now so that it doest become a "zombie" task
+//!             cx.waker().wake_by_ref();
+//!             Poll::Pending;
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! ### Handling task waking and completion awaiting.
+//!
+//! TODO
+//!
+//! - option 1: on poll check special bits/atomic if complete, if not wake waker and
+//!   return pending
+//!
+//! - option 2: on poll store the waker in the operation interaction, due to pinning
+//!   and other guarantees we can give a reference to the atomic waker slot and a completion
+//!   flat to the operation executor which can on completion first set the flag and then
+//!   wake the waker. (+ some CAS-loop magic to handle race conditions).
+//!
+//! - option 3: like option 2 but we have a task which just busy pols completion for all
+//!   pending operations and then wakes the wakers
+//!
+//! I think option 2 doesn't work if the operation executor is hardware and we have a
+//! interrupt handler. Option 1 and 3 should work.
+//!
 //!
 
 use std::{marker::PhantomData, mem, pin::Pin, ptr, task::Context, task::Poll};
@@ -78,6 +473,8 @@ pub unsafe trait OperationInteraction {
     /// - should (will?) not be called twice
     ///
     /// # Safety
+    ///
+    /// - TODO: Buffer must be in a safe to access state after completion
     ///
     /// A implementor of this method must assure on a rust safety level that
     /// once this method returns the operation ended and there is no longer
@@ -201,17 +598,22 @@ where
     ///
     /// # Unsafe-Contract
     ///
-    /// TODO explain why it works and what is needed
+    /// 1. You can pass any buffer in where you guarantee that it only can be re-purposed
+    ///   after the anchor is dropped and that if the anchor is leaked the buffer is
+    ///   guaranteed to be leaked, too.
     ///
-    /// - In practice: you *must* `Pin` the returned instance to the stack
-    /// - This the returned instance is pinned this pin extends to the buffer passed in.
-    ///   (WAIT WE DON'T need to extend the Pin to the buffer!!)
-    /// - WAIT the buffer doesn't need to be on the stack or the same stack scope
-    ///   in all cases (it matters for the fully leak boxed future case with a non 'static
-    ///   box where the ref comes from the outside).
-    /// - WAIT if we guarantee the buffer to be on the stack just above we don't need to
-    ///   carry it's lifetime around.
-    /// TODO TODO TODO TODO (require pin on stack etc.)
+    /// 2. You must `Pin` the anchor and make sure it's pinned in a way that `1.` is
+    ///    still uphold.
+    ///
+    /// It **very strongly** recommended always do following:
+    ///
+    /// 1. Have the buffer on the stack directly above the anchor.
+    /// 2. `Pin` the anchor to the stack immediately after constructing it
+    /// 3. Use the `Pin` to shadow the anchor.
+    ///
+    /// This is the most simple way to guarantee the unsafe contract is uphold.
+    ///
+    /// See module level documentation for more details.
     pub unsafe fn new_unchecked(buffer: &'a mut [V]) -> Self {
         RABufferAnchor {
             buffer_type_hint: PhantomData,
@@ -263,10 +665,10 @@ where
     /// # Safety
     ///
     /// You must guarantee that you only use the pointer after you installed
-    /// a appropriate `OperationInteraction` with [`RABufferAnchor.try_set_new_operation_interaction`].
+    /// a appropriate `OperationInteraction` with [`RABufferAnchor.try_register_new_operation()`].
     ///
     /// The reason why we have this unsafe method instead of returning the pointer
-    /// from [`RABufferAnchor.try_set_new_operation_interaction`] is because you
+    /// from [`RABufferAnchor.try_register_new_operation()`] is because you
     /// might need it to create the `OperationInteraction` instance.
     pub fn get_slice_start_ptr_and_len_unchecked(self: Pin<&mut Self>) -> (*mut V, usize) {
         // Safe: It's unsafe to access the pointer but safe to create it.
@@ -287,7 +689,7 @@ where
     /// 2. You pass in the right `OperationInteraction` instance which guarantees
     ///    that once its `make_sure_operation_ended` method returns the operation
     ///    does no longer access the buffer in any form.
-    pub unsafe fn try_set_new_operation_interaction<'r>(mut self: Pin<&'r mut Self>, new_opt_int: OpInt) -> Result<OperationHandle<'a, 'r, V, OpInt>, ()> {
+    pub unsafe fn try_register_new_operation<'r>(mut self: Pin<&'r mut Self>, new_opt_int: OpInt) -> Result<OperationHandle<'a, 'r, V, OpInt>, ()> {
         if self.as_ref().has_pending_operation() {
             Err(())
         } else {
@@ -433,25 +835,6 @@ where
     OpInt: OperationInteraction + 'a
 {
 
-    /// Detach this `OperationHandle`.
-    ///
-    /// You still need to await completion or cancellation of this operation
-    /// before starting any new operation.
-    ///
-    /// It fully safe and semantically acceptable to drop or leak the returned `Pin`.
-    ///
-    /// # Warning
-    ///
-    /// As you often need to do re-borrows it's easy for the returned `Pin` to have
-    /// a smaller lifetime as the original `Pin`. This can lead to reduced UX when
-    /// re-using the pin returned from detach. It's often (but not always) better to
-    ///
-    pub fn detach(self)  -> Pin<&'r mut RABufferAnchor<'a, V, OpInt>> {
-        // Note: Trick to make sure we don't forget to update this if Self changes.
-        let Self { anchor } = self;
-        anchor
-    }
-
     /// See [`RABufferAnchor.completion()`], through this gives out a `Pin<&mut RABufferAnchor<...>>`
     pub async fn completion(mut self) -> Pin<&'r mut RABufferAnchor<'a, V, OpInt>> {
         self.anchor.as_mut().completion().await;
@@ -476,8 +859,13 @@ where
 macro_rules! ra_buffer_anchor {
     ($name:ident = [$init:literal; $len:literal] of $OpInt:ty) => (
         let mut $name = [$init; $len];
+        // SAFE:
+        // 1. We can use the buffer as it's directly on the stack above the anchor
+        // 2. We directly pin the anchor to the stack as it's required.
         let mut $name = unsafe { RABufferAnchor::<_, $OpInt>::new_unchecked(&mut $name) };
-        // Yirks lifetime folding prevents drop
+        // SAFE:
+        // 1. Works like `pin_mut!` we shadow the same stack allocated buffer to prevent any non-pinned
+        //    access to it.
         let mut $name = unsafe { Pin::new_unchecked(&mut $name) };
     );
 }
@@ -572,7 +960,7 @@ mod tests {
 
     mod RABufferAnchor {
 
-        mod try_set_new_operation_interaction {
+        mod try_register_new_operation {
             use super::super::super::*;
             use super::super::mock_operation::*;
 
@@ -584,7 +972,7 @@ mod tests {
 
                 let (ptr, len) = buffer.as_mut().get_slice_start_ptr_and_len_unchecked();
                 let (op_int, _, new_mock) = OpIntMock::new(ptr, len);
-                let res = unsafe { buffer.as_mut().try_set_new_operation_interaction(op_int) };
+                let res = unsafe { buffer.as_mut().try_register_new_operation(op_int) };
                 assert!(res.is_err());
                 mock.assert_not_run();
                 new_mock.assert_not_run();
@@ -595,24 +983,10 @@ mod tests {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
                 let (ptr, len) = buffer.as_mut().get_slice_start_ptr_and_len_unchecked();
                 let (op_int, _, mock) = OpIntMock::new(ptr, len);
-                let res = unsafe { buffer.as_mut().try_set_new_operation_interaction(op_int) };
+                let res = unsafe { buffer.as_mut().try_register_new_operation(op_int) };
                 assert!(res.is_ok());
                 assert!(buffer.as_ref().has_pending_operation());
                 mock.assert_not_run();
-            }
-
-            #[async_std::test]
-            async fn returns_a_operation_handle_with_the_exact_same_lifetime_as_the_input_pin() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (ptr, len) = buffer.as_mut().get_slice_start_ptr_and_len_unchecked();
-                let (op_int, _, _mock) = OpIntMock::new(ptr, len);
-
-                let mut slot = Some(buffer);
-                let res = unsafe { slot.take().unwrap().try_set_new_operation_interaction(op_int) };
-                let op = res.unwrap();
-                // needs compatible lifetimes or it won't work
-                slot = Some(op.detach());
-                drop(slot)
             }
         }
 
