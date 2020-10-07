@@ -267,6 +267,7 @@
 //! `smol::block_on(future)` would brake the unsafe-contract as it no longer guarantees that
 //! the buffer is on the same or an parent stack of the anchor.
 //!
+//!
 //! ## Implementing Operations with this buffer
 //!
 //! This section contains some information for API implementers which do want to use this buffer.
@@ -322,7 +323,7 @@
 //! // FIXME lifetimes could have better out-life relationships.
 //! // FIXME without a way to move the channel&target back out this API sucks kinda ESPECIALLY with
 //! //       the lifetime constraint but this will be solved soon.
-//! async fn start_dma_operation<'r, 'a, T>(
+//! async fn start_dma_operation<'r, 'a, T, C >(
 //!     mut buffer: Pin<&'r mut RABufferAnchor<'a, T::Word, DMAInteraction>>,
 //!     direction: Direction,
 //!     channel: &'a mut C, //the lifetime sucks bad time, we will fix that in newer version
@@ -349,6 +350,10 @@
 //! With `DMAInteraction` being something along the line of following **pseudo-code**:
 //!
 //! ```ignore
+//! //FIXME C & T should *not* be part of the interface, sure a `dyn C`/`dyn T` would be
+//! //      ok but we want to be able to use the same buffer for different channels and
+//! //      target combinations, so making the `OperationInteraction` generic over the
+//! //      channel and target is a very bad idea.
 //! struct DMAInteraction<'a, C, T>
 //! where
 //!     // The Unpin is NOT NECESSARY it just makes the pseudo-code simpler
@@ -429,21 +434,39 @@
 //!
 //! ### Handling task waking and completion awaiting.
 //!
-//! TODO
+//! In the aboves pseudo-code we busy poll the for the completion of an DMA-Operation,
+//! which is not very good and we can do better.
 //!
-//! - option 1: on poll check special bits/atomic if complete, if not wake waker and
-//!   return pending
+//! Like already mentioned the `OperationInteraction` instance is itself pinned.
+//! This means by using interior mutability on some field of it we can provide
+//! some memory shared between whatever executes the task and our-side which polls
+//! on the task. Naturally we need to use some for of synchronization. But a `atomic`
+//! is often good enough.
 //!
-//! - option 2: on poll store the waker in the operation interaction, due to pinning
-//!   and other guarantees we can give a reference to the atomic waker slot and a completion
-//!   flat to the operation executor which can on completion first set the flag and then
-//!   wake the waker. (+ some CAS-loop magic to handle race conditions).
+//! With that we can do something on *similar* to:
 //!
-//! - option 3: like option 2 but we have a task which just busy pols completion for all
-//!   pending operations and then wakes the wakers
+//! - every time `poll_cancel` or `poll_completion` is called we do:
+//!   1. Check if the action already completed, if so return `Poll::Ready`
+//!   2. If not clone the waker (`cx.waker().clone()`) and replace it as the
+//!      new current waker (guarded with some atomic based spin lock or similar)
+//!      - We might be able to optimize this by only cloning the new waker if it has
+//!        changed.
+//!   3. we might need again check for complete and if so take the waker out again
+//!      if it is still there and wake it (due to race conditions of atomics).
+//!   4. return `Poll::Pending`
 //!
-//! I think option 2 doesn't work if the operation executor is hardware and we have a
-//! interrupt handler. Option 1 and 3 should work.
+//! - once the the operation executor finishes (e.g. a DMA complete interrupt) we do:
+//!   1. set the state to "operation completed"
+//!   2. take out any "current" waker if there is any and wake it.
+//!
+//! There are multiple ways how this can be implemented, some using locking other using
+//! atomics and CAS operations. Depending on the implementation a lot of fine details
+//! must be considered.
+//!
+//! For example a CAS based DAM operation which calls wake from a interrupt handler must
+//! make sure the used scheduler can handle that.
+//!
+//! This area need a bit more prototyping.
 //!
 //!
 
