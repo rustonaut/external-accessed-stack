@@ -132,7 +132,7 @@
 //! # struct DMAInteraction;
 //! # unsafe impl OperationInteraction for DMAInteraction {
 //! #   fn make_sure_operation_ended(self: Pin<&mut Self>) { todo!() }
-//! #   fn poll_cancel(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> { todo!() }
+//! #   fn poll_request_cancellation(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> { todo!() }
 //! #   fn poll_completion(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> { todo!() }
 //! # }
 //! let mut buffer = [0u8; 32];
@@ -409,7 +409,7 @@
 //!         //     "magically" move them out at this palace.
 //!     }
 //!
-//!     fn poll_cancel(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<()> {
+//!     fn poll_request_cancellation(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<()> {
 //!         let self_ = self.get_mut();
 //!         if self_.channel.is_enabled() {
 //!             self_.channel.disable();
@@ -445,7 +445,7 @@
 //!
 //! With that we can do something on *similar* to:
 //!
-//! - every time `poll_cancel` or `poll_completion` is called we do:
+//! - every time `poll_request_cancellation` or `poll_completion` is called we do:
 //!   1. Check if the action already completed, if so return `Poll::Ready`
 //!   2. If not clone the waker (`cx.waker().clone()`) and replace it as the
 //!      new current waker (guarded with some atomic based spin lock or similar)
@@ -548,7 +548,7 @@ pub unsafe trait OperationInteraction {
     /// poll returned `Ready`* doesn't panic. Wrt. this this differs
     /// from a classical poll.
     ///
-    fn poll_cancel(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<()> {
+    fn poll_request_cancellation(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<()> {
         Poll::Ready(())
     }
 
@@ -676,7 +676,7 @@ where
     /// If a operations is currently in process it first awaits the end of the operation.
     ///
     /// This will not try to cancel any ongoing operation. If you need that you
-    /// should await [`RABuffer::notify_cancellation_intend()`] before caling this
+    /// should await [`RABuffer::request_cancellation()`] before caling this
     /// method.
     pub async fn buffer_mut(mut self: Pin<&mut Self>) -> &mut [V] {
         self.as_mut().completion().await;
@@ -693,7 +693,7 @@ where
     /// If a operations is currently in process it first awaits the end of the operation.
     ///
     /// This will not try to cancel any ongoing operation. If you need that you
-    /// should await [`RABuffer::notify_cancellation_intend()`] before caling this
+    /// should await [`RABuffer::request_cancellation()`] before caling this
     /// method.
     pub async fn buffer_ref(mut self: Pin<&mut Self>) -> &[V] {
         self.as_mut().completion().await;
@@ -787,9 +787,9 @@ where
     ///
     /// Calling this directly is only possible if the `OperationHandle`
     /// has been leaked or detached.
-    pub async fn notify_cancellation_intend(self: Pin<&mut Self>) {
+    pub async fn request_cancellation(self: Pin<&mut Self>) {
         if let Some(mut op_int) = self.operation_interaction() {
-            futures_lite::future::poll_fn(|ctx| op_int.as_mut().poll_cancel(ctx)).await;
+            futures_lite::future::poll_fn(|ctx| op_int.as_mut().poll_request_cancellation(ctx)).await;
         }
     }
 
@@ -816,7 +816,7 @@ where
     ///
     /// If it can not be canceled this will just wait normal completion.
     ///
-    /// This will first await `op_int.poll_cancel`, then `op_int.poll_completion`
+    /// This will first await `op_int.poll_request_cancellation`, then `op_int.poll_completion`
     /// and then calls `cleanup_operation`.
     ///
     /// This is normally called implicitly through the `OperationHandle`
@@ -825,7 +825,7 @@ where
     /// Calling this directly is only possible if the `OperationHandle`
     /// has been leaked or detached.
     pub async fn cancellation(mut self: Pin<&mut Self>) {
-        self.as_mut().notify_cancellation_intend().await;
+        self.as_mut().request_cancellation().await;
         self.completion().await;
     }
 
@@ -897,9 +897,9 @@ where
         self.anchor
     }
 
-    /// See [`RABufferAnchor.notify_cancellation_intend()`]
-    pub async fn notify_cancellation_intend(&mut self) {
-        self.anchor.as_mut().notify_cancellation_intend().await;
+    /// See [`RABufferAnchor.request_cancellation()`]
+    pub async fn request_cancellation(&mut self) {
+        self.anchor.as_mut().request_cancellation().await;
     }
 }
 
@@ -979,13 +979,13 @@ mod tests {
                 // We just indicate cancellation but don't wait for
                 // the cancellation to complete (just the notification that
                 // it should cancel completed).
-                op.notify_cancellation_intend().await;
+                op.request_cancellation().await;
                 mi.assert_notify_cancel_run();
 
                 // Now here it gets interesting:
                 //  We still have a ongoing operation which might already have stopped,
-                //  but which isn't cleaned up (removing the op.notify_cancellation_intend above makes
-                //  no difference `op.notify_cancellation_intend` might be a noop).
+                //  but which isn't cleaned up (removing the op.request_cancellation above makes
+                //  no difference `op.request_cancellation` might be a noop).
                 // Now with Drop we can't await completion because we don't have async Drop
                 //  but we still will wait for completion but now blocking int he Drop destructor.
                 //  ...
@@ -1121,16 +1121,16 @@ mod tests {
             }
         }
 
-        mod notify_cancellation_intend {
+        mod request_cancellation {
             use super::super::super::*;
             use super::super::mock_operation::*;
 
             #[async_std::test]
-            async fn awaits_the_poll_cancel_function_on_the_op_int_instance() {
+            async fn awaits_the_poll_request_cancellation_function_on_the_op_int_instance() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.as_mut()).await;
                 mock.assert_not_run();
-                buffer.notify_cancellation_intend().await;
+                buffer.request_cancellation().await;
                 mock.assert_notify_cancel_run();
             }
         }
@@ -1173,7 +1173,7 @@ mod tests {
             use super::super::mock_operation::*;
 
             #[async_std::test]
-            async fn polls_op_int_poll_cancel_and_complete() {
+            async fn polls_op_int_poll_request_cancellation_and_complete() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.as_mut()).await;
                 mock.assert_not_run();
@@ -1249,17 +1249,17 @@ mod tests {
             }
         }
 
-        mod notify_cancellation_intend {
+        mod request_cancellation {
             use super::super::super::*;
             use super::super::mock_operation::*;
 
             // we know this forwards so we only test if it forward to the right place
             #[async_std::test]
-            async fn polls_op_int_poll_cancel() {
+            async fn polls_op_int_poll_request_cancellation() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
                 let (mut op, mock) = mock_operation(buffer.as_mut()).await;
                 mock.assert_not_run();
-                op.notify_cancellation_intend().await;
+                op.request_cancellation().await;
                 mock.assert_notify_cancel_run();
             }
         }
@@ -1270,7 +1270,7 @@ mod tests {
 
             // we know this forwards so we only test if it forward to the right place
             #[async_std::test]
-            async fn polls_op_int_poll_cancel() {
+            async fn polls_op_int_poll_request_cancellation() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
                 let (op, mock) = mock_operation(buffer.as_mut()).await;
                 mock.assert_not_run();

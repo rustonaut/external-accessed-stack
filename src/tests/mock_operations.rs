@@ -77,12 +77,12 @@ unsafe impl OperationInteraction for OpIntMock {
         }
     }
 
-    fn poll_cancel(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+    fn poll_request_cancellation(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
         let mut mock_info = self.fixed_address_mock_call();
         if mock_info.called_poll_completion {
             return Poll::Ready(());
         }
-        mock_info.called_poll_cancel = true;
+        mock_info.called_poll_request_cancellation = true;
         if mock_info.yields_before_cancel_ready > 0 {
             mock_info.yields_before_cancel_ready -= 1;
             cx.waker().wake_by_ref();
@@ -103,7 +103,7 @@ pub struct CallInfo {
     pub called_make_sure_operation_ended: bool,
     pub called_poll_completion: bool,
     pub yields_before_completion_ready: usize,
-    pub called_poll_cancel: bool,
+    pub called_poll_request_cancellation: bool,
     pub yields_before_cancel_ready: usize,
     pub op_int_addr: Vec<*mut OpIntMock>,
     pub was_dropped: bool,
@@ -115,7 +115,7 @@ impl Default for CallInfo {
         let mut rng = rand::thread_rng();
         CallInfo {
             called_make_sure_operation_ended: false,
-            called_poll_cancel: false,
+            called_poll_request_cancellation: false,
             called_poll_completion: false,
             yields_before_cancel_ready: rng.gen_range(0,5),
             yields_before_completion_ready: rng.gen_range(0,5),
@@ -136,28 +136,28 @@ impl MockInfo {
     pub fn assert_not_run(&self) {
         let mock_info = self.mock_info.borrow();
         assert_eq!(mock_info.called_make_sure_operation_ended, false);
-        assert_eq!(mock_info.called_poll_cancel, false);
+        assert_eq!(mock_info.called_poll_request_cancellation, false);
         assert_eq!(mock_info.called_poll_completion, false);
     }
 
     pub fn assert_completion_run(&self) {
         let mock_info = self.mock_info.borrow();
         assert_eq!(mock_info.called_make_sure_operation_ended, true);
-        assert_eq!(mock_info.called_poll_cancel, false);
+        assert_eq!(mock_info.called_poll_request_cancellation, false);
         assert_eq!(mock_info.called_poll_completion, true);
     }
 
     pub fn assert_cancellation_run(&self) {
         let mock_info = self.mock_info.borrow();
         assert_eq!(mock_info.called_make_sure_operation_ended, true);
-        assert_eq!(mock_info.called_poll_cancel, true);
+        assert_eq!(mock_info.called_poll_request_cancellation, true);
         assert_eq!(mock_info.called_poll_completion, true);
     }
 
     pub fn assert_notify_cancel_run(&self) {
         let mock_info = self.mock_info.borrow();
         assert_eq!(mock_info.called_make_sure_operation_ended, false);
-        assert_eq!(mock_info.called_poll_cancel, true);
+        assert_eq!(mock_info.called_poll_request_cancellation, true);
         assert_eq!(mock_info.called_poll_completion, false);
 
     }
