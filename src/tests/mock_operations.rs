@@ -60,6 +60,8 @@ impl Drop for OpIntMock {
 }
 
 unsafe impl OperationInteraction for OpIntMock {
+    type Result = ();
+
     fn make_sure_operation_ended(mut self: Pin<&mut Self>) {
         let mut mock_info = self.fixed_address_mock_call();
         mock_info.called_make_sure_operation_ended = true;

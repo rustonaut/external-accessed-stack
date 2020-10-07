@@ -131,6 +131,7 @@
 //! # use remote_accessed_buffer::{OperationInteraction, RABufferAnchor};
 //! # struct DMAInteraction;
 //! # unsafe impl OperationInteraction for DMAInteraction {
+//! #   type Result = ();
 //! #   fn make_sure_operation_ended(self: Pin<&mut Self>) { todo!() }
 //! #   fn poll_request_cancellation(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> { todo!() }
 //! #   fn poll_completion(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> { todo!() }
@@ -314,6 +315,10 @@
 //!   pending future or a permanently hanging `drop` method. Which both are really really bad. (This is the
 //!   price for temporary handing out ownership of stack allocated buffers).
 //!
+//! - Whatever is used to implement an operation must make sure the `Result` type has the right trait bound
+//!   nearly all operations happen semantically outside of the thread so nearly all operations need the
+//!   result type to be `Send`.
+//!
 //! Below is the **pseudo-code** of how a function starting a DMA transfer might look:
 //!
 //! FIXME: Test that pseudo code in a integration test.
@@ -491,6 +496,14 @@ use crate::utils::abort_on_panic;
 /// details.
 pub unsafe trait OperationInteraction {
 
+    /// Type of which value is returned on completion.
+    ///
+    /// A value which indicates which the operation failed or succeeded can returned.
+    ///
+    /// Note that most operations happen semantically outside of the thread, so in
+    /// most cases `Result` should be `Send`
+    type Result;
+
     /// This method only returns when the operation ended.
     ///
     /// This method is always called before cleaning up an operation.
@@ -580,9 +593,9 @@ pub unsafe trait OperationInteraction {
     ///
     /// See the module level documentation about how to implement this in
     /// a way which is not just busy polling but used the `Context`'s `Waker`.
-    fn poll_completion(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()>;
-
+    fn poll_completion(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Result>;
 }
+
 
 //Note: I could use #[pin_project] but I have additional
 //      restrictions for `operation_interaction` and need
@@ -800,6 +813,8 @@ where
 
     /// If there is an ongoing operation await the completion of it.
     ///
+    /// Returns the result if there was a ongoing operation.
+    ///
     /// This will await `op_int.poll_completion` and then call `cleanup_operation`.
     ///
     /// This is normally called implicitly through the `OperationHandle`
@@ -807,19 +822,23 @@ where
     ///
     /// Calling this directly is only possible if the `OperationHandle`
     /// has been leaked or detached.ge).
-    pub async fn completion(mut self: Pin<&mut Self>) {
+    pub async fn completion(mut self: Pin<&mut Self>) -> Option<OpInt::Result> {
+        let mut result = None;
         if let Some(mut op_int) = self.as_mut().operation_interaction() {
-            futures_lite::future::poll_fn(|ctx| op_int.as_mut().poll_completion(ctx)).await;
+            result = Some(futures_lite::future::poll_fn(|ctx| op_int.as_mut().poll_completion(ctx)).await);
         }
         //WARNING: Some other internal methods might rely on completion always calling
         //         `self.cleanup_operation()` at the end! So don't remove it it might
         //         brake the unsafe-contract.
         self.cleanup_operation();
+        result
     }
 
     /// If there is an ongoing operation notify it to be canceled and await the completion of it.
     ///
     /// If it can not be canceled this will just wait normal completion.
+    ///
+    /// Returns the result if there was a ongoing operation.
     ///
     /// This will first await `op_int.poll_request_cancellation`, then `op_int.poll_completion`
     /// and then calls `cleanup_operation`.
@@ -829,9 +848,9 @@ where
     ///
     /// Calling this directly is only possible if the `OperationHandle`
     /// has been leaked or detached.
-    pub async fn cancellation(mut self: Pin<&mut Self>) {
+    pub async fn cancellation(mut self: Pin<&mut Self>) -> Option<OpInt::Result> {
         self.as_mut().request_cancellation().await;
-        self.completion().await;
+        self.completion().await
     }
 
     /// Cleanup any previous operation.
@@ -890,16 +909,14 @@ where
     OpInt: OperationInteraction + 'a
 {
 
-    /// See [`RABufferAnchor.completion()`], through this gives out a `Pin<&mut RABufferAnchor<...>>`
-    pub async fn completion(mut self) -> Pin<&'r mut RABufferAnchor<'a, V, OpInt>> {
-        self.anchor.as_mut().completion().await;
-        self.anchor
+    /// See [`RABufferAnchor.completion()`]
+    pub async fn completion(mut self) -> Option<OpInt::Result> {
+        self.anchor.as_mut().completion().await
     }
 
-    /// See [`RABufferAnchor.cancellation()`], through this gives out a `Pin<&mut RABufferAnchor<...>>`
-    pub async fn cancellation(mut self) -> Pin<&'r mut RABufferAnchor<'a, V, OpInt>> {
-        self.anchor.as_mut().cancellation().await;
-        self.anchor
+    /// See [`RABufferAnchor.cancellation()`]
+    pub async fn cancellation(mut self) -> Option<OpInt::Result> {
+        self.anchor.as_mut().cancellation().await
     }
 
     /// See [`RABufferAnchor.request_cancellation()`]
@@ -961,18 +978,15 @@ mod tests {
                 {
                     // Doing re-borrows with as_mut() can be useful
                     // to avoid lifetime/move problems.
-                    let  buffer = buffer.as_mut();
-                    let (op, mi) = call_op(buffer).await;
+                    let mut buffer = buffer.as_mut();
+                    let (op, mi) = call_op(buffer.as_mut()).await;
                     mi.assert_not_run();
-                    // A buffer mut ref we can reuse.
-                    // Note that it has exact the same lifetime as
-                    // the moved buffer mut ref 3 lines above.
-                    let buffer = op.completion().await;
+                    op.completion().await;
                     mi.assert_completion_run();
 
-                    let (op, mi) = call_op(buffer).await;
+                    let (op, mi) = call_op(buffer.as_mut()).await;
                     mi.assert_not_run();
-                    let buffer = op.cancellation().await;
+                    op.cancellation().await;
                     mi.assert_cancellation_run();
 
                     // Buffer is just a fancy `&mut ...` so
