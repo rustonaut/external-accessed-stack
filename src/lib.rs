@@ -285,7 +285,7 @@
 //! - Semantically the ownership of the buffer is passed to whatever executes the operation until it completes.
 //!   This is also why the anchor stores a pointer instead of a reference to the buffer.
 //!
-//! - To make it easier to build operations the [`RABufferAnchor.get_slice_start_ptr_and_len_unchecked()`] methods
+//! - To make it easier to build operations the [`RABufferAnchor.get_buffer_ptr_and_len()`] methods
 //!   can be called *before* starting a new operation. **But the returned ptr MUST NOT be dereferenced before
 //!   the operation starts.**. Even if you just created a reference but don't use it it's already a violation
 //!   of the unsafe contract (this is necessary due to how compliers treat references wrt. optimizations).
@@ -334,7 +334,7 @@
 //!     C: dma::Channel + 'a
 //! {
 //!     buffer.cancellation().await;
-//!     let (ptr, len) = buffer.as_mut().get_slice_start_ptr_and_len();
+//!     let (ptr, len) = buffer.as_mut().get_buffer_ptr_and_len();
 //!     let interaction = DMAInteraction::new(ptr, len, channel, target);
 //!     // Safe: We register the right interaction.
 //!     let operation_handle = unsafe { buffer.as_mut().try_register_new_operation(interaction) };
@@ -718,7 +718,7 @@ where
     /// The reason why we have this unsafe method instead of returning the pointer
     /// from [`RABufferAnchor.try_register_new_operation()`] is because you
     /// might need it to create the `OperationInteraction` instance.
-    pub fn get_slice_start_ptr_and_len_unchecked(self: Pin<&mut Self>) -> (*mut V, usize) {
+    pub fn get_buffer_ptr_and_len(self: Pin<&mut Self>) -> (*mut V, usize) {
         // Safe: It's unsafe to access the pointer but safe to create it.
         unsafe { self.get_unchecked_mut().buffer }
     }
@@ -1020,7 +1020,7 @@ mod tests {
 
                 let (_, mock) = mock_operation(buffer.as_mut()).await;
 
-                let (ptr, len) = buffer.as_mut().get_slice_start_ptr_and_len_unchecked();
+                let (ptr, len) = buffer.as_mut().get_buffer_ptr_and_len();
                 let (op_int, _, new_mock) = OpIntMock::new(ptr, len);
                 let res = unsafe { buffer.as_mut().try_register_new_operation(op_int) };
                 assert!(res.is_err());
@@ -1031,7 +1031,7 @@ mod tests {
             #[async_std::test]
             async fn sets_the_operation() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (ptr, len) = buffer.as_mut().get_slice_start_ptr_and_len_unchecked();
+                let (ptr, len) = buffer.as_mut().get_buffer_ptr_and_len();
                 let (op_int, _, mock) = OpIntMock::new(ptr, len);
                 let res = unsafe { buffer.as_mut().try_register_new_operation(op_int) };
                 assert!(res.is_ok());
@@ -1047,12 +1047,12 @@ mod tests {
             #[async_std::test]
             async fn does_not_change_anything_if_there_was_no_pending_operation() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (ptr, len) = buffer.as_mut().get_slice_start_ptr_and_len_unchecked();
+                let (ptr, len) = buffer.as_mut().get_buffer_ptr_and_len();
                 let has_op = buffer.as_ref().has_pending_operation();
 
                 buffer.as_mut().cleanup_operation();
 
-                let (ptr2, len2) = buffer.as_mut().get_slice_start_ptr_and_len_unchecked();
+                let (ptr2, len2) = buffer.as_mut().get_buffer_ptr_and_len();
                 let has_op2 = buffer.as_ref().has_pending_operation();
 
                 assert_eq!(ptr, ptr2);
@@ -1086,7 +1086,7 @@ mod tests {
             }
         }
 
-        mod get_slice_start_ptr_and_len_unchecked {
+        mod get_buffer_ptr_and_len {
             use super::super::super::*;
             use super::super::mock_operation::*;
 
@@ -1100,7 +1100,7 @@ mod tests {
                 let mut anchor = unsafe { RABufferAnchor::<_, OpIntMock>::new_unchecked(buffer) };
                 let anchor = unsafe { Pin::new_unchecked(&mut anchor) };
 
-                let (ptr, len) = anchor.get_slice_start_ptr_and_len_unchecked();
+                let (ptr, len) = anchor.get_buffer_ptr_and_len();
                 assert_eq!(len, buff_len);
                 assert_eq!(ptr, buff_ptr);
             }
