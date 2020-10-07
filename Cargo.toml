@@ -4,11 +4,12 @@ version = "0.1.0"
 authors = ["Philipp Korber <philipp@korber.dev>"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = []
 
 [dependencies]
 pin-utils = "0.1.0"
-futures-lite = "1.8.0"
+futures-lite = { version="1.10.1", default-features=false }
 
 [dev-dependencies]
 rand = "0.7.3"

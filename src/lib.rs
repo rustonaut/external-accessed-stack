@@ -127,7 +127,7 @@
 //! `ra_buffer_anchor!(buffer = [0u8; 32] of DMAInteraction)` code:
 //!
 //! ```no_run
-//! # use std::{pin::Pin, task::{Context, Poll}};
+//! # use core::{pin::Pin, task::{Context, Poll}};
 //! # use remote_accessed_buffer::{OperationInteraction, RABufferAnchor};
 //! # struct DMAInteraction;
 //! # unsafe impl OperationInteraction for DMAInteraction {
@@ -469,10 +469,15 @@
 //! This area need a bit more prototyping.
 //!
 //!
+#![no_std]
+
+#[cfg(test)]
+#[macro_use]
+extern crate std;
 
 mod utils;
 
-use std::{marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, task::Context, task::Poll};
+use core::{marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, task::Context, task::Poll};
 use crate::utils::abort_on_panic;
 /// Trait for type allowing interaction with an ongoing operation
 ///
@@ -684,7 +689,7 @@ where
         //       sure it's completed (completion always calls `cleanup_operation`).
         unsafe {
             let (ptr, len) = self.get_unchecked_mut().buffer;
-            std::slice::from_raw_parts_mut(ptr, len)
+            core::slice::from_raw_parts_mut(ptr, len)
         }
     }
 
@@ -701,7 +706,7 @@ where
         //       sure it's completed (completion always calls `cleanup_operation`).
         unsafe {
             let (ptr, len) = self.get_unchecked_mut().buffer;
-            std::slice::from_raw_parts(ptr, len)
+            core::slice::from_raw_parts(ptr, len)
         }
     }
 
@@ -929,7 +934,7 @@ mod tests {
     mod mock_operation;
 
     mod usage_patterns {
-        use std::mem;
+        use core::mem;
         use super::super::*;
         use super::mock_operation::*;
 
