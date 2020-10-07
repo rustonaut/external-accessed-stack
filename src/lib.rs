@@ -486,18 +486,36 @@ use mem::ManuallyDrop;
 /// details.
 pub unsafe trait OperationInteraction {
 
+    /// This method only returns when the operation ended.
     ///
-    /// - blocks until operation ended
-    /// - should try to cancel if the operation did not yet ended and
-    ///   the operation does support cancellation.
-    /// - can be called after operation ended
-    /// - must be callable in both sync anc async code (and yes it still blocks
-    ///   in async code).
-    /// - should (will?) not be called twice
+    /// This method is always called before cleaning up an operation.
+    ///
+    /// It is guaranteed to be called after [`OperationInteraction.poll_completion()`] returns `Ready`.
+    ///
+    /// It is guaranteed to be called before this [`OperationInteraction`] instance is dropped, if it's
+    /// dropped from inside of the anchor.
+    ///
+    /// It is also always called when the anchor is dropped and there is a operation which has
+    /// not yet been cleaned up.
+    ///
+    /// If possible this method should try to cancel any ongoing operation so that it can
+    /// return as fast as possible.
+    ///
+    /// This method will be called both in sync and async code. It MUST NOT depend on environmental
+    /// context provided by an async runtime/executor/scheduler or similar.
+    ///
+    /// It MUST be no problem to call this method more then once.
+    ///
+    /// Due to lifetimes and mutule borrows this method will never be called more then once
+    /// concurrently, only more then once sequentially.
+    ///
+    /// # Panic = Abort
+    ///
+    /// Due to safety reason a panic in a call to this method will cause an
+    /// abort as we can no longer be sure that the buffer is accessible but
+    /// as the buffer might be on the (real) stack we can also not leak it.
     ///
     /// # Safety
-    ///
-    /// - TODO: Buffer must be in a safe to access state after completion
     ///
     /// A implementor of this method must assure on a rust safety level that
     /// once this method returns the operation ended and there is no longer
@@ -505,7 +523,7 @@ pub unsafe trait OperationInteraction {
     /// return by panic.**
     ///
     /// As such if you for whatever reason can no longer be sure that this
-    /// is the case you can only either hand the thread or abort the program.
+    /// is the case you can only either hang the thread or abort the program.
     /// Because of this this library is only nice for cases where we can make
     /// sure a operation either completed or was canceled.
     ///
@@ -550,6 +568,13 @@ pub unsafe trait OperationInteraction {
     /// 1. We might never poll it (in case of `Drop`'ing the anchor).
     /// 2. We might only poll it once we hope/expect it to be roughly done.
     ///
+    /// So polling this should never drive the operation to completion,
+    /// only check for it to be completed.
+    ///
+    /// # Wakers
+    ///
+    /// See the module level documentation about how to implement this in
+    /// a way which is not just busy polling but used the `Context`'s `Waker`.
     fn poll_completion(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()>;
 
 }
