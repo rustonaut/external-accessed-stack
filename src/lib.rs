@@ -736,9 +736,8 @@ where
     /// The reason why we have this unsafe method instead of returning the pointer
     /// from [`RABufferAnchor.try_register_new_operation()`] is because you
     /// might need it to create the `OperationInteraction` instance.
-    pub fn get_buffer_ptr_and_len(self: Pin<&mut Self>) -> (*mut V, usize) {
-        // Safe: It's unsafe to access the pointer but safe to create it.
-        unsafe { self.get_unchecked_mut().buffer }
+    pub fn get_buffer_ptr_and_len(self: Pin<&Self>) -> (*mut V, usize) {
+        self.as_ref().buffer
     }
 
     /// Set's a new operations interaction iff there is currently no ongoing interaction.
@@ -943,6 +942,36 @@ macro_rules! ra_buffer_anchor {
 }
 
 
+#[cfg(feature="embedded-dma")]
+const _: () =  {
+    use embedded_dma::{ReadBuffer, WriteBuffer, Word};
+
+    unsafe impl<'r, 'a, V, OpInt> ReadBuffer for Pin<&'r mut RABufferAnchor<'a, V, OpInt>>
+    where
+        V: Word + 'a,
+        OpInt: OperationInteraction + 'a,
+    {
+        type Word = V;
+        unsafe fn read_buffer(&self) -> (*const V, usize) {
+            let (ptr, len) = self.as_ref().get_buffer_ptr_and_len();
+            (ptr as *const V, len)
+        }
+    }
+
+    unsafe impl<'r, 'a, V, OpInt> WriteBuffer for Pin<&'r mut RABufferAnchor<'a, V, OpInt>>
+    where
+        V: Word + 'a,
+        OpInt: OperationInteraction + 'a,
+    {
+        type Word = V;
+        unsafe fn write_buffer(&mut self) -> (*mut V, usize) {
+            self.as_ref().get_buffer_ptr_and_len()
+        }
+    }
+
+};
+
+
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
@@ -1041,7 +1070,7 @@ mod tests {
 
                 let (_, mock) = mock_operation(buffer.as_mut()).await;
 
-                let (ptr, len) = buffer.as_mut().get_buffer_ptr_and_len();
+                let (ptr, len) = buffer.as_ref().get_buffer_ptr_and_len();
                 let (op_int, _, new_mock) = OpIntMock::new(ptr, len);
                 let res = unsafe { buffer.as_mut().try_register_new_operation(op_int) };
                 assert!(res.is_err());
@@ -1052,7 +1081,7 @@ mod tests {
             #[async_std::test]
             async fn sets_the_operation() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (ptr, len) = buffer.as_mut().get_buffer_ptr_and_len();
+                let (ptr, len) = buffer.as_ref().get_buffer_ptr_and_len();
                 let (op_int, _, mock) = OpIntMock::new(ptr, len);
                 let res = unsafe { buffer.as_mut().try_register_new_operation(op_int) };
                 assert!(res.is_ok());
@@ -1068,12 +1097,12 @@ mod tests {
             #[async_std::test]
             async fn does_not_change_anything_if_there_was_no_pending_operation() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (ptr, len) = buffer.as_mut().get_buffer_ptr_and_len();
+                let (ptr, len) = buffer.as_ref().get_buffer_ptr_and_len();
                 let has_op = buffer.as_ref().has_pending_operation();
 
                 buffer.as_mut().cleanup_operation();
 
-                let (ptr2, len2) = buffer.as_mut().get_buffer_ptr_and_len();
+                let (ptr2, len2) = buffer.as_ref().get_buffer_ptr_and_len();
                 let has_op2 = buffer.as_ref().has_pending_operation();
 
                 assert_eq!(ptr, ptr2);
@@ -1121,7 +1150,7 @@ mod tests {
                 let mut anchor = unsafe { RABufferAnchor::<_, OpIntMock>::new_unchecked(buffer) };
                 let anchor = unsafe { Pin::new_unchecked(&mut anchor) };
 
-                let (ptr, len) = anchor.get_buffer_ptr_and_len();
+                let (ptr, len) = anchor.as_ref().get_buffer_ptr_and_len();
                 assert_eq!(len, buff_len);
                 assert_eq!(ptr, buff_ptr);
             }

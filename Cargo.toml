@@ -10,6 +10,7 @@ default = []
 [dependencies]
 pin-utils = "0.1.0"
 futures-lite = { version="1.10.1", default-features=false }
+embedded-dma = { version="0.1.2", optional=true }
 
 [dev-dependencies]
 rand = "0.7.3"

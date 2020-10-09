@@ -17,7 +17,7 @@ pub fn not(v: bool) -> bool {
 /// or target address or similar).
 pub async fn mock_operation<'r, 'a, T>(mut buffer: Pin<&'r mut RABufferAnchor<'a, T, OpIntMock>>) -> (OperationHandle<'a,'r, T, OpIntMock>, MockInfo) {
     buffer.as_mut().cancellation().await;
-    let (buffer_start, len) = buffer.as_mut().get_buffer_ptr_and_len();
+    let (buffer_start, len) = buffer.as_ref().get_buffer_ptr_and_len();
     let (op_int, start, mock_info) = OpIntMock::new(buffer_start, len);
     // Safe: We pass in the right opt_int (well as we don't actually access the buffer it kinda doesn't matter)
     let op_handle = unsafe { buffer.try_register_new_operation(op_int) };
