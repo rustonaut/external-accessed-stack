@@ -481,6 +481,8 @@
 extern crate std;
 
 mod utils;
+#[cfg(feature="op_int_utils")]
+pub mod op_int_utils;
 
 use core::{marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, task::Context, task::Poll};
 use crate::utils::abort_on_panic;

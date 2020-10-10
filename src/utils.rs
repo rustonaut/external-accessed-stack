@@ -1,5 +1,6 @@
 use core::mem;
 
+
 // Abort on panic in closure, useful for cases where panic recovery is not possible.
 pub fn abort_on_panic<T>(func: impl FnOnce() -> T) -> T {
     let abort_on_drop = AbortOnDrop;
