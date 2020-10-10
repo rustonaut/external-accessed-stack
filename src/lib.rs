@@ -973,16 +973,16 @@ const _: () =  {
 
 
 #[cfg(test)]
+mod mock_operation;
+
+#[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
-
-    #[path="./mock_operations.rs"]
-    mod mock_operation;
 
     mod usage_patterns {
         use core::mem;
         use super::super::*;
-        use super::mock_operation::*;
+        use crate::mock_operation::*;
 
         #[async_std::test]
         async fn leaked_operations_get_canceled_and_ended_before_new_operations() {
@@ -1062,7 +1062,7 @@ mod tests {
 
         mod try_register_new_operation {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             #[async_std::test]
             async fn fails_if_a_operation_is_still_pending() {
@@ -1092,7 +1092,7 @@ mod tests {
 
         mod cleanup_operation {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             #[async_std::test]
             async fn does_not_change_anything_if_there_was_no_pending_operation() {
@@ -1138,7 +1138,7 @@ mod tests {
 
         mod get_buffer_ptr_and_len {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             #[async_std::test]
             async fn return_the_right_pointer_and_len() {
@@ -1158,7 +1158,7 @@ mod tests {
 
         mod has_pending_operation {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             #[async_std::test]
             async fn returns_true_if_there_is_a_not_cleaned_up_operation() {
@@ -1173,7 +1173,7 @@ mod tests {
 
         mod request_cancellation {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             #[async_std::test]
             async fn awaits_the_poll_request_cancellation_function_on_the_op_int_instance() {
@@ -1187,7 +1187,7 @@ mod tests {
 
         mod completion {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             #[async_std::test]
             async fn polls_op_int_poll_completion() {
@@ -1220,7 +1220,7 @@ mod tests {
 
         mod cancellation {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             #[async_std::test]
             async fn polls_op_int_poll_request_cancellation_and_complete() {
@@ -1252,7 +1252,7 @@ mod tests {
 
         mod buffer_mut {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             #[async_std::test]
             async fn buffer_access_awaits_completion() {
@@ -1267,7 +1267,7 @@ mod tests {
 
         mod buffer_ref {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             #[async_std::test]
             async fn buffer_access_awaits_completion() {
@@ -1286,7 +1286,7 @@ mod tests {
 
         mod completion {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             // we know this forwards so we only test if it forward to the right place
             #[async_std::test]
@@ -1301,7 +1301,7 @@ mod tests {
 
         mod request_cancellation {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             // we know this forwards so we only test if it forward to the right place
             #[async_std::test]
@@ -1316,7 +1316,7 @@ mod tests {
 
         mod cancellation {
             use super::super::super::*;
-            use super::super::mock_operation::*;
+            use crate::mock_operation::*;
 
             // we know this forwards so we only test if it forward to the right place
             #[async_std::test]

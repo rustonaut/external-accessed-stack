@@ -2,7 +2,7 @@ use std::{cell::{RefCell, RefMut}, rc::Rc, vec::Vec};
 
 use rand::Rng;
 
-use super::super::*;
+use crate::*;
 
 pub type MockBufferMut<'r, 'a> = Pin<&'r mut RABufferAnchor<'a, u8, OpIntMock>>;
 
