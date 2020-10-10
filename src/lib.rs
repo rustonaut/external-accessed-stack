@@ -156,7 +156,7 @@
 //!
 //! Furthermore by shadowing the anchor with it's pin we make sure it's impossible to
 //! access the anchor through anything but the `Pin`. If we would not have shadowed it
-//! we would need to manually guarantee that it's not accessed which is just realy anoying
+//! we would need to manually guarantee that it's not accessed which is just really annoying
 //! to do and error prone. Note that this aspects works exactly the same as `pin_mut!`.
 //! I literally could have replaced the last line with `pin_mut!(buffer)` having one
 //! unsafe line less in my code (but instead in `pin_mut!`). But for demonstration
@@ -164,7 +164,7 @@
 //!
 //! Now one think which should be mentioned is that needing to wait for completion in
 //! `Drop::drop` is not the best thing to do. We can not get around it but having something
-//! like a `AsyncDropPreperation` trait which automatically does something like a async
+//! like a `AsyncDropPreparation` trait which automatically does something like a async
 //! drop before the drop would be supper helpful (a `AsyncDrop` which replaces `Drop` can't
 //! really work as far as I know).
 //!
@@ -177,7 +177,7 @@
 //! This instance can be used to check if the operation ended.
 //!
 //! This instance is *not* placed in the `OperationHandle` returned. Instead it is placed
-//! "upstram" in the pinned anchor. This mean we can guarantee to have access to it until
+//! "upstream" in the pinned anchor. This mean we can guarantee to have access to it until
 //! we explicitly remove it because we realized the operation ended.
 //!
 //! The `OperationHandle` just wraps the used `Pin<&mut RABufferAnchor<...>>` to have a
@@ -694,7 +694,7 @@ where
     /// If a operations is currently in process it first awaits the end of the operation.
     ///
     /// This will not try to cancel any ongoing operation. If you need that you
-    /// should await [`RABuffer::request_cancellation()`] before caling this
+    /// should await [`RABuffer::request_cancellation()`] before calling this
     /// method.
     pub async fn buffer_mut(mut self: Pin<&mut Self>) -> &mut [V] {
         self.as_mut().completion().await;
