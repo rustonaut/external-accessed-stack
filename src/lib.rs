@@ -599,6 +599,35 @@ pub unsafe trait OperationInteraction {
 }
 
 
+//FIXME THIS DESIGN IS BROKEN AND UNSOUND!!
+//      - For waker handling this design relies on being able to give out a pointer
+//        to the stack inside of the `operation_interaction` field. But this is unsound.
+//        The reason for this is that while we have an external `&`-like reference to the
+//        field through `Pin<&mut>` we have an additional `&mut` reference at the same time
+//        which isn't sound and with current rust tools *can not be made sound*. `UnsafeCell`
+//        allows us to go from a given `&` to a `&mut` but there is nothing which allows us
+//        to put a border between a `&mut` turning it into a `&`. Sure we can always coerce a
+//        `&mut` into a `&` but a `&mut S` implies a `&mut` to all fields of `S` including the
+//        field we want to have an external `&`-like reference to. And while the `&`-like
+//        reference will be a `*const` pointer we still want to dereference it at some point
+//        at which we might have a concurrent `&` (pointer deref) and `&mut` (implied from `&mut`
+//        on the `operation_interaction` field).
+//
+//      - Now we can fix this by basing everything on `Pin<&Self>` and using interior mutability.
+//        But this will noticeable reduce the usability as the properties of a `&mut` handle are
+//        expected.
+//
+//      - To have that we need to more decouple the anchor and handle. And we can by using either
+//        one pointer and offsets to fields or multiple pointer. But getting the lifetime right
+//        for this is tricky. (And it's more unsafe code).
+//
+//      - But for operation interaction we will need to go with `Pin<&Self>`. But most
+//        `OperationInteraction` handles I can think of will not care much either as they
+//        will use internal mutability anyway.
+//
+//      - So do we pass around a `&mut Handle(*const anchor)`? It's an additional indirectly
+//        but would allow handling everything like a `&mut buffer`.
+//
 //Note: I could use #[pin_project] but I have additional
 //      restrictions for `operation_interaction` and need
 //      to project into the option. So it's not worth it.
