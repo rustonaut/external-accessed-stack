@@ -22,10 +22,10 @@
 //! - `Pin<&mut RABufferAnchor<...>>` mostly works like a `&mut` but sadly
 //!   doesn't automatically re-borrow. So e.g. calling `method(buffer); method(buffer);`
 //!   doesn't work as `buffer` is moved into `method`. To get re-borrowing
-//!   behavior like for a `&mut` you can use `.as_mut()`. E.g.
-//!   `method(buffer.as_mut()); method(buffer.as_mut());`.
-//!   Sadly that also means that for most methods on it you will use `.as_mut()`.
-//!   E.g. `buffer.as_mut().completion().await`. Which is a bit annoying but
+//!   behavior like for a `&mut` you can use `.reborrow()`. E.g.
+//!   `method(buffer.reborrow()); method(buffer.reborrow());`.
+//!   Sadly that also means that for most methods on it you will use `.reborrow()`.
+//!   E.g. `buffer.reborrow().completion().await`. Which is a bit annoying but
 //!   currently a limitation of rust.
 //!
 //! - Given that there is currently no async destructor it is recommended
@@ -132,9 +132,9 @@
 //! # struct DMAInteraction;
 //! # unsafe impl OperationInteraction for DMAInteraction {
 //! #   type Result = ();
-//! #   fn make_sure_operation_ended(self: Pin<&mut Self>) { todo!() }
-//! #   fn poll_request_cancellation(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> { todo!() }
-//! #   fn poll_completion(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> { todo!() }
+//! #   fn make_sure_operation_ended(self: Pin<&Self>) { todo!() }
+//! #   fn poll_request_cancellation(self: Pin<&Self>, cx: &mut Context) -> Poll<()> { todo!() }
+//! #   fn poll_completion(self: Pin<&Self>, cx: &mut Context) -> Poll<()> { todo!() }
 //! # }
 //! let mut buffer = [0u8; 32];
 //! // SAFE:
@@ -253,7 +253,7 @@
 //!     // 2. We shadow and pin it afterwards
 //!     let buffer = unsafe { RABufferAnchor::<_, DMAInteraction>::new_unchecked(&mut buffer); };
 //!     pin_mut!(buffer)
-//!     do_some_dma_magic(buffer.as_mut()).await;
+//!     do_some_dma_magic(buffer.reborrow()).await;
 //!     // make sure we properly await any pending operation aboves method might not have
 //!     // awaited the completion on, so that we don't block on drop (through that kinda doesn't
 //!     // matter in this example).
@@ -276,7 +276,7 @@
 //! - The [`RABufferAnchor.try_register_new_operation()`] method can be used to register a new operation.
 //!
 //! - As it will fail if there is still a ongoing operation ist recommended that the method calling register
-//!   does a `buffer.as_mut().cancellation().await`.  In some special cases a `buffer.as_mut().completion().await`
+//!   does a `buffer.reborrow().cancellation().await`.  In some special cases a `buffer.reborrow().completion().await`
 //!   can be appropriate to. But generally starting a new operation should cancel ongoing operations which have
 //!   not yet been completed if possible. Only the [`RABufferAnchor.buffer_mut()`] and [`RABufferAnchor.buffer_ref()`]
 //!   methods should to a implicit awaiting of completion (Which they do as there behavior is not generic.)
@@ -324,7 +324,7 @@
 //! FIXME: Test that pseudo code in a integration test.
 //!
 //! ```ignore
-//! // call like `start_dma_operation(buffer.as_mut(), Direction::FromMemory, Periphery::FooBarDataPort).await;`
+//! // call like `start_dma_operation(buffer.reborrow(), Direction::FromMemory, Periphery::FooBarDataPort).await;`
 //! // FIXME lifetimes could have better out-life relationships.
 //! // FIXME without a way to move the channel&target back out this API sucks kinda ESPECIALLY with
 //! //       the lifetime constraint but this will be solved soon.
@@ -339,13 +339,13 @@
 //!     C: dma::Channel + 'a
 //! {
 //!     buffer.cancellation().await;
-//!     let (ptr, len) = buffer.as_mut().get_buffer_ptr_and_len();
+//!     let (ptr, len) = buffer.reborrow().get_buffer_ptr_and_len();
 //!     let interaction = DMAInteraction::new(ptr, len, channel, target);
 //!     // Safe: We register the right interaction.
-//!     let operation_handle = unsafe { buffer.as_mut().try_register_new_operation(interaction) };
+//!     let operation_handle = unsafe { buffer.reborrow().try_register_new_operation(interaction) };
 //!     // SAFE(unwrap): We made sure the operation ended by polling cancellation
 //!     let mut operation_handle = operation_handle.unwrap();
-//!     let op_int = operation_handle.as_mut().operation_interaction()
+//!     let op_int = operation_handle.reborrow().operation_interaction()
 //!     // SAFE: We must only call `start` once before it started.
 //!     unsafe { op_int.start() };
 //!     operation_handle
@@ -380,7 +380,7 @@
 //!         Self { ptr, len, channel, target }
 //!     }
 //!
-//!     unsafe fn start(self: Pin<&mut Self>) {
+//!     unsafe fn start(self: Pin<&Self>) {
 //!         let self_ = self.get_mut();
 //!         self_.target.enable_dma();
 //!         let channel = &mut self._channel;
@@ -402,7 +402,7 @@
 //!     C: dma::Channel + Unpin + 'a,
 //!     T: dma::Target + Unpin + 'a,
 //! {
-//!     fn make_sure_operation_ended(self: Pin<&mut Self>) {
+//!     fn make_sure_operation_ended(self: Pin<&Self>) {
 //!         let self_ = self.get_mut(); // or p
 //!         while !self_.is_completed() {
 //!             spin_loop_hint()
@@ -414,7 +414,7 @@
 //!         //     "magically" move them out at this palace.
 //!     }
 //!
-//!     fn poll_request_cancellation(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<()> {
+//!     fn poll_request_cancellation(self: Pin<&Self>, _cx: &mut Context) -> Poll<()> {
 //!         let self_ = self.get_mut();
 //!         if self_.channel.is_enabled() {
 //!             self_.channel.disable();
@@ -423,7 +423,7 @@
 //!
 //!     // There are better ways to do this (using interrupts + wakers) but for this
 //!     // example this is enough.
-//!     fn poll_completion(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+//!     fn poll_completion(self: Pin<&Self>, cx: &mut Context) -> Poll<()> {
 //!         let self_ = self.get_mut();
 //!         if self_.is_completed() {
 //!             Poll::Ready(())
@@ -484,7 +484,7 @@ mod utils;
 #[cfg(feature="op_int_utils")]
 pub mod op_int_utils;
 
-use core::{marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, task::Context, task::Poll};
+use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, task::Context, task::Poll};
 use crate::utils::abort_on_panic;
 /// Trait for type allowing interaction with an ongoing operation
 ///
@@ -551,7 +551,7 @@ pub unsafe trait OperationInteraction {
     /// be polled before so if you can no longer say if it completed or not
     /// it's can be better to hang the future and with that permanently leak
     /// the buffer instead of hanging the thread.
-    fn make_sure_operation_ended(self: Pin<&mut Self>);
+    fn make_sure_operation_ended(self: Pin<&Self>);
 
     /// Notifies the operation that it should be canceled.
     ///
@@ -568,7 +568,7 @@ pub unsafe trait OperationInteraction {
     /// poll returned `Ready`* doesn't panic. Wrt. this this differs
     /// from a classical poll.
     ///
-    fn poll_request_cancellation(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<()> {
+    fn poll_request_cancellation(self: Pin<&Self>, _cx: &mut Context) -> Poll<()> {
         Poll::Ready(())
     }
 
@@ -595,7 +595,7 @@ pub unsafe trait OperationInteraction {
     ///
     /// See the module level documentation about how to implement this in
     /// a way which is not just busy polling but used the `Context`'s `Waker`.
-    fn poll_completion(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Result>;
+    fn poll_completion(self: Pin<&Self>, cx: &mut Context) -> Poll<Self::Result>;
 }
 
 
@@ -627,14 +627,17 @@ pub unsafe trait OperationInteraction {
 //
 //      - So do we pass around a `&mut Handle(*const anchor)`? It's an additional indirectly
 //        but would allow handling everything like a `&mut buffer`.
+//  STEPS:
+//      1. [ok] Replace all Pin<&mut> with Pin<&>
+//      2. [  ] Use internally mutability where necessary.
+//      3. [  ] Fix UX.
 //
 //Note: I could use #[pin_project] but I have additional
 //      restrictions for `operation_interaction` and need
 //      to project into the option. So it's not worth it.
 pub struct RABufferAnchor<'a, V, OpInt>
 where
-    V: 'a,
-    OpInt: OperationInteraction + 'a
+    OpInt: OperationInteraction,
 {
 
     /// We store the buffer as a tuple of a pointer to it's start and it's length.
@@ -655,7 +658,7 @@ where
 
     /// Type to interact with ongoing operations.
     ///
-    /// # Pin Safety (wrt. Pin<&mut Self>)
+    /// # Pin Safety (wrt. Pin<&Self>)
     ///
     /// This type guarantees that there are no inner references or similar
     /// to this field.
@@ -682,13 +685,14 @@ where
     /// waker of an future polling on `poll_completion` and waking it (
     /// assuming the async runtime implements wake in a way which can
     /// be called from an interrupt).
-    operation_interaction: Option<ManuallyDrop<OpInt>>
+    /// TODO: Update Doc wrt. UnsafeCell
+    operation_interaction: UnsafeCell<Option<ManuallyDrop<OpInt>>>
 }
+
 
 impl<'a, V, OpInt> RABufferAnchor<'a, V, OpInt>
 where
-    V: 'a,
-    OpInt: OperationInteraction  + 'a
+    OpInt: OperationInteraction
 {
 
     /// Create a new instance with given buffer.
@@ -715,8 +719,104 @@ where
         RABufferAnchor {
             buffer_type_hint: PhantomData,
             buffer: (buffer as *mut _ as *mut V, buffer.len()),
-            operation_interaction: None
+            operation_interaction: UnsafeCell::new(None),
         }
+    }
+}
+
+impl<'a, V, OpInt> Drop for RABufferAnchor<'a, V, OpInt>
+where
+    OpInt: OperationInteraction
+{
+    fn drop(&mut self) {
+        // Safe: We are about to drop self and can guarantee it's no longer moved before drop
+        let mut handle = unsafe { RABufferHandle::new_unchecked(self) };
+        handle.cleanup_operation();
+    }
+}
+
+/// TODO TODO TODO
+///
+/// TODO: Variance as if &'a mut [..]
+///       Which means covariance over 'a and invariance over
+///       V and OpInt
+///
+/// TODO: Acts like a `Pin`
+pub struct RABufferHandle<'a, V, OpInt>
+where
+    OpInt: OperationInteraction
+{
+    // TODO rewrite the warning now that we use `&` instead of NonNull
+    // WARNING: While this behaves roughly like a `&mut`
+    //          we MUST NOT create a `&mut` to the anchor.
+    //          At least not while there is a operation ongoing
+    //          as this would imply a &mut aliasing on all fields
+    //          including the operation interaction and all of it's
+    //          direct struct fields. Which makes storing wakers and
+    //          similar impossible. Instead create a `&` to the anchor
+    //          and use the anchors internal mutability (`UnsafeCell`)
+    //          if necessary. BUT while there is concurrent access into
+    //          the OperationInteraction instance this is guaranteed to
+    //          only be the case while a operation is ongoing so if there
+    //          is no registered operation or that operation is known to
+    //          have been ended we can access the `UnsafeCell` with a `&mut`
+    //          IF there is at any time only one usable reference to the
+    //          handle. By making the handle act like a `&mut` we can
+    //          guarantee that without needing further synchronization.
+    anchor: Pin<&'a RABufferAnchor<'a, V, OpInt>>
+}
+
+impl<'a, V, OpInt> RABufferHandle<'a, V, OpInt>
+where
+    OpInt: OperationInteraction
+{
+
+    ///
+    /// # Unsafe-Contract
+    ///
+    /// TODO: foo bar from Anchor new_unchecked
+    /// TODO: Pin::new_unchecked
+    unsafe fn new_unchecked<'b>(anchor: &'a mut RABufferAnchor<'b,V,OpInt>) -> Self
+    where
+        'b: 'a
+    {
+        // lifetime collapse (erase the longer living 'b and replace it with the
+        // shorter living 'a also restore covariance, which is fine as we basically
+        // semantically collapse a `&mut &mut buffer` into a `&mut buffer`).
+        // TODO: Check if `&mut &mut` to `&mut` collapse is generally valid or if
+        //       it's just valid for this specific use-case.
+        let anchor: &'a RABufferAnchor<'a, V, OpInt> = anchor;
+        // Safe: because of
+        //   - the guarantees given when calling this function
+        //   - the guarantees given when creating the anchor
+        let anchor = Pin::new_unchecked(anchor);
+        RABufferHandle { anchor }
+    }
+
+    /// Re-borrows the handle in the same way you would re-borrow a `&mut T` ref.
+    pub fn reborrow(&mut self) -> RABufferHandle<V, OpInt> {
+        RABufferHandle { anchor: self.anchor }
+    }
+
+    /// Returns a reference to the underlying operation interaction instance.
+    ///
+    /// Returns `None` if there is no ongoing operation.
+    pub fn operation_interaction(&self) -> Option<Pin<&OpInt>> {
+        //Safe: If we have a `&self` we know there is no `&mut self` and
+        //      as such we know any `&` based access to operation interaction
+        //      is safe to do. (The only places where we have a internal `&mut`
+        //      is on `&mut self` calls, and only because we can't have a `&mut`
+        //      to the anchor utile following issue is fixed:
+        //      https://github.com/rust-lang/rust/issues/63818)
+        let op_int = unsafe {
+            &*self.anchor.operation_interaction.get()
+        };
+        let op_int = op_int.as_ref().map(|man_drop| {
+            let op_int: &OpInt = &*man_drop;
+            //Safe: operation interaction is pinned through the anchor pin
+            unsafe { Pin::new_unchecked(&*op_int) }
+        });
+        op_int
     }
 
 
@@ -727,30 +827,16 @@ where
     /// This will not try to cancel any ongoing operation. If you need that you
     /// should await [`RABuffer::request_cancellation()`] before calling this
     /// method.
-    pub async fn buffer_mut(mut self: Pin<&mut Self>) -> &mut [V] {
-        self.as_mut().completion().await;
+    ///
+    /// Note that there is no `buffer`/`buffer_ref` as we always need a `&mut self`
+    /// anyway to access the buffer.
+    pub async fn buffer_mut(&mut self) -> &mut [V] {
+        self.reborrow().completion().await;
+        let (ptr, len) = self.anchor.buffer;
         // Safe: We have a (pinned) &mut borrow to the anchor and we made
         //       sure it's completed (completion always calls `cleanup_operation`).
         unsafe {
-            let (ptr, len) = self.get_unchecked_mut().buffer;
             core::slice::from_raw_parts_mut(ptr, len)
-        }
-    }
-
-    /// Returns a reference to the underling buffer.
-    ///
-    /// If a operations is currently in process it first awaits the end of the operation.
-    ///
-    /// This will not try to cancel any ongoing operation. If you need that you
-    /// should await [`RABuffer::request_cancellation()`] before caling this
-    /// method.
-    pub async fn buffer_ref(mut self: Pin<&mut Self>) -> &[V] {
-        self.as_mut().completion().await;
-        // Safe: We have a (pinned) &mut borrow to the anchor and we made
-        //       sure it's completed (completion always calls `cleanup_operation`).
-        unsafe {
-            let (ptr, len) = self.get_unchecked_mut().buffer;
-            core::slice::from_raw_parts(ptr, len)
         }
     }
 
@@ -767,8 +853,8 @@ where
     /// The reason why we have this unsafe method instead of returning the pointer
     /// from [`RABufferAnchor.try_register_new_operation()`] is because you
     /// might need it to create the `OperationInteraction` instance.
-    pub fn get_buffer_ptr_and_len(self: Pin<&Self>) -> (*mut V, usize) {
-        self.as_ref().buffer
+    pub fn get_buffer_ptr_and_len(&self) -> (*mut V, usize) {
+        self.anchor.buffer
     }
 
     /// Set's a new operations interaction iff there is currently no ongoing interaction.
@@ -785,17 +871,18 @@ where
     /// 2. You pass in the right `OperationInteraction` instance which guarantees
     ///    that once its `make_sure_operation_ended` method returns the operation
     ///    does no longer access the buffer in any form.
-    pub unsafe fn try_register_new_operation<'r>(mut self: Pin<&'r mut Self>, new_opt_int: OpInt) -> Result<OperationHandle<'a, 'r, V, OpInt>, ()> {
-        if self.as_ref().has_pending_operation() {
+    pub unsafe fn try_register_new_operation(self, new_op_int: OpInt) -> Result<OperationHandle<'a, V, OpInt>, ()> {
+        if self.has_pending_operation() {
             Err(())
         } else {
-            // Safe: We know it's `None`, a `None` value on `operation_interaction`
-            //       has explicitly no pinning guarantees in this types unsafe
-            //       contract. As such we can "just" set it to `Some(..)`
+            // Safe:
+            //  - We have a `&mut self` so we can access operation interaction as `&mut`
+            //    IF there is no ongoing operation.
+            //  - We know there is no ongoing operations as we checked this above.
             {
-                let opt_pin = &mut self.as_mut().get_unchecked_mut().operation_interaction;
-                debug_assert!(opt_pin.is_none());
-                *opt_pin = Some(ManuallyDrop::new(new_opt_int));
+                let op_int = &mut *self.anchor.operation_interaction.get();
+                debug_assert!(op_int.is_none());
+                *op_int = Some(ManuallyDrop::new(new_op_int));
             }
             Ok(OperationHandle { anchor: self })
         }
@@ -807,37 +894,20 @@ where
     /// [`RABufferAnchor.cleanup_operation()`] wasn't called yet
     /// (which also means that we did neither await [`RABufferAnchor.completion()`] nor
     /// [`RABufferAnchor.cancellation()`])
-    pub fn has_pending_operation(self: Pin<&Self>) -> bool {
-        self.get_ref().operation_interaction.is_some()
+    pub fn has_pending_operation(&self) -> bool {
+        self.operation_interaction().is_some()
     }
 
-    /// Projection allowing access to the internally stored [`OperationInteraction`] instance.
-    ///
-    /// Returns `None` if there is no ongoing interaction.
-    pub fn operation_interaction(self: Pin<&mut Self>) -> Option<Pin<&mut OpInt>> {
-        // SAFE: Due to the special guarantees we give to the operation_interaction
-        //       field it is safe to create a `Option<Pin<&mut OpInt>>` from it.
-        //       Through we need to give some guarantees around it like we must not
-        //       move out the `OpInt` in the drop implementation (which is why it's
-        //       wrapped in ManuallyDrop so that we can drop it in place).
-        unsafe  {
-            self.get_unchecked_mut()
-                .operation_interaction
-                .as_mut()
-                .map(|op_int| Pin::new_unchecked(&mut **op_int))
-        }
-    }
-
-    /// If there is an ongoing operation notify it to be canceld.
+    /// If there is an ongoing operation notify it to be canceled.
     ///
     /// This is normally called implicitly through the `OperationHandle`
     /// which is often wrapped in some operation specific type.
     ///
     /// Calling this directly is only possible if the `OperationHandle`
     /// has been leaked or detached.
-    pub async fn request_cancellation(self: Pin<&mut Self>) {
-        if let Some(mut op_int) = self.operation_interaction() {
-            futures_lite::future::poll_fn(|ctx| op_int.as_mut().poll_request_cancellation(ctx)).await;
+    pub async fn request_cancellation(&mut self) {
+        if let Some(op_int) = self.operation_interaction() {
+            futures_lite::future::poll_fn(|ctx| op_int.poll_request_cancellation(ctx)).await;
         }
     }
 
@@ -852,10 +922,10 @@ where
     ///
     /// Calling this directly is only possible if the `OperationHandle`
     /// has been leaked or detached.ge).
-    pub async fn completion(mut self: Pin<&mut Self>) -> Option<OpInt::Result> {
+    pub async fn completion(&mut self) -> Option<OpInt::Result> {
         let mut result = None;
-        if let Some(mut op_int) = self.as_mut().operation_interaction() {
-            result = Some(futures_lite::future::poll_fn(|ctx| op_int.as_mut().poll_completion(ctx)).await);
+        if let Some(op_int) = self.operation_interaction() {
+            result = Some(futures_lite::future::poll_fn(|ctx| op_int.poll_completion(ctx)).await);
         }
         //WARNING: Some other internal methods might rely on completion always calling
         //         `self.cleanup_operation()` at the end! So don't remove it it might
@@ -878,8 +948,8 @@ where
     ///
     /// Calling this directly is only possible if the `OperationHandle`
     /// has been leaked or detached.
-    pub async fn cancellation(mut self: Pin<&mut Self>) -> Option<OpInt::Result> {
-        self.as_mut().request_cancellation().await;
+    pub async fn cancellation(&mut self) -> Option<OpInt::Result> {
+        self.request_cancellation().await;
         self.completion().await
     }
 
@@ -891,67 +961,60 @@ where
     /// This should normally *not* be called directly but only implicitly
     /// through `completion().await` or `cancellation().await`. Through there
     /// are some supper rare edge cases where exposing it is use-full.
-    pub fn cleanup_operation(mut self: Pin<&mut Self>) {
-        if let Some(mut opt_int) = self.as_mut().operation_interaction() {
-            abort_on_panic(|| opt_int.as_mut().make_sure_operation_ended());
+    pub fn cleanup_operation(&mut self) {
+        let mut needs_drop = false;
+        if let Some(opt_int) = self.operation_interaction() {
+            abort_on_panic(|| opt_int.make_sure_operation_ended());
+            needs_drop = true;
+        }
+
+        if needs_drop {
             // Safe:
-            //   1. We called `make_sure_operation_ended`.
-            //   2. We drop it in-place without moving it.
-            //   3. We will override the now "cobbled" option field
+            //   1. We have a `&mut self` borrow.
+            //   2. We called `make_sure_operation_ended`.
+            //   3. We drop it in-place without moving it.
+            //   4. We will override the now "cobbled" option field
             //      with `None` which is fine as we already dropped the
             //      pinned value and pin must only hold until it's dropped.
             unsafe {
-                ptr::drop_in_place(opt_int.get_unchecked_mut());
+                let outer_mut = &mut *self.anchor.operation_interaction.get();
+                if let Some(man_drop) = outer_mut.as_mut() {
+                    let op_int = &mut **man_drop as *mut OpInt;
+                    ptr::drop_in_place(op_int);
+                }
+                ptr::write(outer_mut, None);
             }
         }
-        // Safe: Either it's already `None` or we just dropped the inner (ManuallyDrop wrapped) value and
-        //       as such ended it's pinning constraint.
-        unsafe { self.get_unchecked_mut().operation_interaction = None; }
-    }
-
-}
-
-impl<'a, V, OpInt> Drop for RABufferAnchor<'a, V, OpInt>
-where
-    V: 'a,
-    OpInt: OperationInteraction + 'a
-{
-    fn drop(&mut self) {
-        // Safe: We are about to drop self and can guarantee it's no longer moved before drop
-        let pinned = unsafe { Pin::new_unchecked(self) };
-        pinned.cleanup_operation();
     }
 }
 
-/// Type wrapping a `Pin<&mut RABufferAnchor<...>>` which has a currently ongoing operation.
-pub struct OperationHandle<'a, 'r, V, OpInt>
+/// Type wrapping a `RABufferHandle` which has a currently ongoing operation.
+pub struct OperationHandle<'a, V, OpInt>
 where
-    V: 'a,
-    OpInt: OperationInteraction + 'a
+    OpInt: OperationInteraction
 {
-    anchor: Pin<&'r mut RABufferAnchor<'a, V, OpInt>>
+    anchor: RABufferHandle<'a, V, OpInt>
 }
 
 
-impl<'a, 'r, V, OpInt> OperationHandle<'a, 'r, V, OpInt>
+impl<'a, 'r, V, OpInt> OperationHandle<'a, V, OpInt>
 where
-    V: 'a,
-    OpInt: OperationInteraction + 'a
+    OpInt: OperationInteraction
 {
 
     /// See [`RABufferAnchor.completion()`]
     pub async fn completion(mut self) -> Option<OpInt::Result> {
-        self.anchor.as_mut().completion().await
+        self.anchor.completion().await
     }
 
     /// See [`RABufferAnchor.cancellation()`]
     pub async fn cancellation(mut self) -> Option<OpInt::Result> {
-        self.anchor.as_mut().cancellation().await
+        self.anchor.cancellation().await
     }
 
     /// See [`RABufferAnchor.request_cancellation()`]
     pub async fn request_cancellation(&mut self) {
-        self.anchor.as_mut().request_cancellation().await;
+        self.anchor.request_cancellation().await;
     }
 }
 
@@ -968,7 +1031,8 @@ macro_rules! ra_buffer_anchor {
         // SAFE:
         // 1. Works like `pin_mut!` we shadow the same stack allocated buffer to prevent any non-pinned
         //    access to it.
-        let mut $name = unsafe { Pin::new_unchecked(&mut $name) };
+        //FIXME: Update SAFE doc
+        let mut $name = unsafe { RABufferHandle::new_unchecked(&mut $name) };
     );
 }
 
@@ -984,7 +1048,7 @@ const _: () =  {
     {
         type Word = V;
         unsafe fn read_buffer(&self) -> (*const V, usize) {
-            let (ptr, len) = self.as_ref().get_buffer_ptr_and_len();
+            let (ptr, len) = self.reborrow().get_buffer_ptr_and_len();
             (ptr as *const V, len)
         }
     }
@@ -996,7 +1060,7 @@ const _: () =  {
     {
         type Word = V;
         unsafe fn write_buffer(&mut self) -> (*mut V, usize) {
-            self.as_ref().get_buffer_ptr_and_len()
+            self.reborrow().get_buffer_ptr_and_len()
         }
     }
 
@@ -1021,30 +1085,30 @@ mod tests {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
 
                 // If we leaked the op we still can poll on the buffer directly
-                let mi = call_and_leak_op(buffer.as_mut()).await;
+                let mi = call_and_leak_op(buffer.reborrow()).await;
                 mi.assert_not_run();
-                buffer.as_mut().completion().await;
+                buffer.reborrow().completion().await;
                 mi.assert_completion_run();
 
                 // If we create a new operation while one is still running the old one is first canceled.
-                let old_mi = call_and_leak_op(buffer.as_mut()).await;
+                let old_mi = call_and_leak_op(buffer.reborrow()).await;
                 old_mi.assert_not_run();
-                let mi = call_and_leak_op(buffer.as_mut()).await;
+                let mi = call_and_leak_op(buffer.reborrow()).await;
                 old_mi.assert_cancellation_run();
                 mi.assert_not_run();
-                buffer.as_mut().cancellation().await;
+                buffer.reborrow().cancellation().await;
                 mi.assert_cancellation_run();
 
                 {
                     // Doing re-borrows with as_mut() can be useful
                     // to avoid lifetime/move problems.
-                    let mut buffer = buffer.as_mut();
-                    let (op, mi) = call_op(buffer.as_mut()).await;
+                    let mut buffer = buffer.reborrow();
+                    let (op, mi) = call_op(buffer.reborrow()).await;
                     mi.assert_not_run();
                     op.completion().await;
                     mi.assert_completion_run();
 
-                    let (op, mi) = call_op(buffer.as_mut()).await;
+                    let (op, mi) = call_op(buffer.reborrow()).await;
                     mi.assert_not_run();
                     op.cancellation().await;
                     mi.assert_cancellation_run();
@@ -1078,13 +1142,13 @@ mod tests {
             mi.assert_op_ended_enforced();
         }
 
-        async fn call_and_leak_op<'r, 'a>(buffer: MockBufferMut<'r,'a>) -> MockInfo {
+        async fn call_and_leak_op<'a>(buffer: RABufferHandle<'a, u8, OpIntMock>) -> MockInfo {
             let (op, mock_info) = mock_operation(buffer).await;
             mem::forget(op);
             mock_info
         }
 
-        async fn call_op<'r, 'a>(buffer: MockBufferMut<'r, 'a>) -> (OperationHandle<'a,'r, u8, OpIntMock>, MockInfo) {
+        async fn call_op<'a>(buffer: RABufferHandle<'a, u8, OpIntMock>) -> (OperationHandle<'a, u8, OpIntMock>, MockInfo) {
             mock_operation(buffer).await
         }
     }
@@ -1099,11 +1163,11 @@ mod tests {
             async fn fails_if_a_operation_is_still_pending() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
 
-                let (_, mock) = mock_operation(buffer.as_mut()).await;
+                let (_, mock) = mock_operation(buffer.reborrow()).await;
 
-                let (ptr, len) = buffer.as_ref().get_buffer_ptr_and_len();
+                let (ptr, len) = buffer.reborrow().get_buffer_ptr_and_len();
                 let (op_int, _, new_mock) = OpIntMock::new(ptr, len);
-                let res = unsafe { buffer.as_mut().try_register_new_operation(op_int) };
+                let res = unsafe { buffer.reborrow().try_register_new_operation(op_int) };
                 assert!(res.is_err());
                 mock.assert_not_run();
                 new_mock.assert_not_run();
@@ -1112,11 +1176,11 @@ mod tests {
             #[async_std::test]
             async fn sets_the_operation() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (ptr, len) = buffer.as_ref().get_buffer_ptr_and_len();
+                let (ptr, len) = buffer.reborrow().get_buffer_ptr_and_len();
                 let (op_int, _, mock) = OpIntMock::new(ptr, len);
-                let res = unsafe { buffer.as_mut().try_register_new_operation(op_int) };
+                let res = unsafe { buffer.reborrow().try_register_new_operation(op_int) };
                 assert!(res.is_ok());
-                assert!(buffer.as_ref().has_pending_operation());
+                assert!(buffer.reborrow().has_pending_operation());
                 mock.assert_not_run();
             }
         }
@@ -1128,13 +1192,13 @@ mod tests {
             #[async_std::test]
             async fn does_not_change_anything_if_there_was_no_pending_operation() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (ptr, len) = buffer.as_ref().get_buffer_ptr_and_len();
-                let has_op = buffer.as_ref().has_pending_operation();
+                let (ptr, len) = buffer.reborrow().get_buffer_ptr_and_len();
+                let has_op = buffer.reborrow().has_pending_operation();
 
-                buffer.as_mut().cleanup_operation();
+                buffer.reborrow().cleanup_operation();
 
-                let (ptr2, len2) = buffer.as_ref().get_buffer_ptr_and_len();
-                let has_op2 = buffer.as_ref().has_pending_operation();
+                let (ptr2, len2) = buffer.reborrow().get_buffer_ptr_and_len();
+                let has_op2 = buffer.reborrow().has_pending_operation();
 
                 assert_eq!(ptr, ptr2);
                 assert_eq!(len, len2);
@@ -1144,24 +1208,24 @@ mod tests {
             #[async_std::test]
             async fn does_make_sure_the_operation_completed_without_moving() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (_op, mock) = mock_operation(buffer.as_mut()).await;
-                let op_int_addr = buffer.as_mut()
+                let (_op, mock) = mock_operation(buffer.reborrow()).await;
+                let op_int_addr = buffer
                     .operation_interaction()
-                    .map(|pin| pin.get_mut() as *mut _)
+                    .map(|pin| pin.get_ref() as *const _)
                     .unwrap();
-                buffer.as_mut().cleanup_operation();
+                buffer.reborrow().cleanup_operation();
                 mock.assert_op_int_addr_eq(op_int_addr);
             }
 
             #[async_std::test]
             async fn does_drop_the_operation_in_place() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (_op, mock) = mock_operation(buffer.as_mut()).await;
-                let op_int_addr = buffer.as_mut()
+                let (_op, mock) = mock_operation(buffer.reborrow()).await;
+                let op_int_addr = buffer.reborrow()
                     .operation_interaction()
-                    .map(|pin| pin.get_mut() as *mut _)
+                    .map(|pin| pin.get_ref() as *const _)
                     .unwrap();
-                buffer.as_mut().cleanup_operation();
+                buffer.reborrow().cleanup_operation();
                 mock.assert_op_int_addr_eq(op_int_addr);
                 mock.assert_was_dropped();
             }
@@ -1179,9 +1243,9 @@ mod tests {
                 let buff_len = buffer.len();
 
                 let mut anchor = unsafe { RABufferAnchor::<_, OpIntMock>::new_unchecked(buffer) };
-                let anchor = unsafe { Pin::new_unchecked(&mut anchor) };
+                let anchor = unsafe { RABufferHandle::new_unchecked(&mut anchor) };
 
-                let (ptr, len) = anchor.as_ref().get_buffer_ptr_and_len();
+                let (ptr, len) = anchor.get_buffer_ptr_and_len();
                 assert_eq!(len, buff_len);
                 assert_eq!(ptr, buff_ptr);
             }
@@ -1194,11 +1258,11 @@ mod tests {
             #[async_std::test]
             async fn returns_true_if_there_is_a_not_cleaned_up_operation() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                assert!(not(buffer.as_ref().has_pending_operation()));
-                let (op, _mock) = mock_operation(buffer.as_mut()).await;
-                assert!(op.anchor.as_ref().has_pending_operation());
+                assert!(not(buffer.reborrow().has_pending_operation()));
+                let (op, _mock) = mock_operation(buffer.reborrow()).await;
+                assert!(op.anchor.has_pending_operation());
                 op.cancellation().await;
-                assert!(not(buffer.as_ref().has_pending_operation()));
+                assert!(not(buffer.reborrow().has_pending_operation()));
             }
         }
 
@@ -1209,7 +1273,7 @@ mod tests {
             #[async_std::test]
             async fn awaits_the_poll_request_cancellation_function_on_the_op_int_instance() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.as_mut()).await;
+                let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.request_cancellation().await;
                 mock.assert_notify_cancel_run();
@@ -1223,7 +1287,7 @@ mod tests {
             #[async_std::test]
             async fn polls_op_int_poll_completion() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.as_mut()).await;
+                let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.completion().await;
                 mock.assert_completion_run();
@@ -1232,7 +1296,7 @@ mod tests {
             #[async_std::test]
             async fn makes_sure_to_make_sure_operation_actually_did_end() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.as_mut()).await;
+                let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.completion().await;
                 mock.assert_completion_run();
@@ -1242,7 +1306,7 @@ mod tests {
             #[async_std::test]
             async fn makes_sure_to_clean_up_after_completion() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.as_mut()).await;
+                let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.completion().await;
                 mock.assert_was_dropped();
@@ -1256,7 +1320,7 @@ mod tests {
             #[async_std::test]
             async fn polls_op_int_poll_request_cancellation_and_complete() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.as_mut()).await;
+                let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.cancellation().await;
                 mock.assert_cancellation_run();
@@ -1266,7 +1330,7 @@ mod tests {
             #[async_std::test]
             async fn makes_sure_that_operation_ended() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.as_mut()).await;
+                let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.cancellation().await;
                 mock.assert_cancellation_run();
@@ -1275,7 +1339,7 @@ mod tests {
             #[async_std::test]
             async fn makes_sure_to_clean_up() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.as_mut()).await;
+                let (_, mock) = mock_operation(buffer.reborrow()).await;
                 buffer.cancellation().await;
                 mock.assert_was_dropped();
             }
@@ -1288,24 +1352,9 @@ mod tests {
             #[async_std::test]
             async fn buffer_access_awaits_completion() {
                 ra_buffer_anchor!(buffer = [12u32; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.as_mut()).await;
+                let (_, mock) = mock_operation(buffer.reborrow()).await;
                 let mut_ref = buffer.buffer_mut().await;
                 assert_eq!(mut_ref, &mut [12u32; 32] as &mut [u32]);
-                mock.assert_completion_run();
-                mock.assert_was_dropped();
-            }
-        }
-
-        mod buffer_ref {
-            use super::super::super::*;
-            use crate::mock_operation::*;
-
-            #[async_std::test]
-            async fn buffer_access_awaits_completion() {
-                ra_buffer_anchor!(buffer = [12u32; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.as_mut()).await;
-                let a_ref = buffer.buffer_ref().await;
-                assert_eq!(a_ref, &[12u32; 32] as &[u32]);
                 mock.assert_completion_run();
                 mock.assert_was_dropped();
             }
@@ -1323,7 +1372,7 @@ mod tests {
             #[async_std::test]
             async fn polls_op_int_poll_completion() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (op, mock) = mock_operation(buffer.as_mut()).await;
+                let (op, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 op.completion().await;
                 mock.assert_completion_run();
@@ -1338,7 +1387,7 @@ mod tests {
             #[async_std::test]
             async fn polls_op_int_poll_request_cancellation() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (mut op, mock) = mock_operation(buffer.as_mut()).await;
+                let (mut op, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 op.request_cancellation().await;
                 mock.assert_notify_cancel_run();
@@ -1353,7 +1402,7 @@ mod tests {
             #[async_std::test]
             async fn polls_op_int_poll_request_cancellation() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
-                let (op, mock) = mock_operation(buffer.as_mut()).await;
+                let (op, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 op.cancellation().await;
                 mock.assert_cancellation_run();
