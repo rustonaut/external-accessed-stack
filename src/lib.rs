@@ -1017,26 +1017,26 @@ macro_rules! ra_buffer_anchor {
 const _: () =  {
     use embedded_dma::{ReadBuffer, WriteBuffer, Word};
 
-    unsafe impl<'r, 'a, V, OpInt> ReadBuffer for Pin<&'r mut RABufferAnchor<'a, V, OpInt>>
+    unsafe impl<'a, V, OpInt> ReadBuffer for RABufferHandle<'a, V, OpInt>
     where
-        V: Word + 'a,
-        OpInt: OperationInteraction + 'a,
+        V: Word,
+        OpInt: OperationInteraction,
     {
         type Word = V;
         unsafe fn read_buffer(&self) -> (*const V, usize) {
-            let (ptr, len) = self.reborrow().get_buffer_ptr_and_len();
+            let (ptr, len) = self.get_buffer_ptr_and_len();
             (ptr as *const V, len)
         }
     }
 
-    unsafe impl<'r, 'a, V, OpInt> WriteBuffer for Pin<&'r mut RABufferAnchor<'a, V, OpInt>>
+    unsafe impl<'a, V, OpInt> WriteBuffer for RABufferHandle<'a, V, OpInt>
     where
-        V: Word + 'a,
-        OpInt: OperationInteraction + 'a,
+        V: Word,
+        OpInt: OperationInteraction,
     {
         type Word = V;
         unsafe fn write_buffer(&mut self) -> (*mut V, usize) {
-            self.reborrow().get_buffer_ptr_and_len()
+            self.get_buffer_ptr_and_len()
         }
     }
 
