@@ -983,6 +983,11 @@ where
     pub async fn request_cancellation(&mut self) {
         self.anchor.request_cancellation().await;
     }
+
+    /// See [`RABufferAnchor.operation_interaction()`]
+    pub fn operation_interaction(&self) -> Option<Pin<&OpInt>> {
+        self.anchor.operation_interaction()
+    }
 }
 
 
