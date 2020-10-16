@@ -465,7 +465,7 @@
 extern crate std;
 
 mod utils;
-#[cfg(feature="op_int_utils")]
+#[cfg(feature="op-int-utils")]
 pub mod op_int_utils;
 
 use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, task::Context, task::Poll};
@@ -579,6 +579,10 @@ pub unsafe trait OperationInteraction {
     ///
     /// See the module level documentation about how to implement this in
     /// a way which is not just busy polling but used the `Context`'s `Waker`.
+    ///
+    /// # Poll Semantics
+    ///
+    /// Polling this after it returned `Ready` is allowed to panic.
     fn poll_completion(self: Pin<&Self>, cx: &mut Context) -> Poll<Self::Result>;
 }
 
@@ -1225,7 +1229,7 @@ mod tests {
 
         mod has_pending_operation {
             use super::super::super::*;
-            use crate::mock_operation::*;
+            use crate::{mock_operation::*, utils::not};
 
             #[async_std::test]
             async fn returns_true_if_there_is_a_not_cleaned_up_operation() {

@@ -38,3 +38,9 @@ impl Drop for AbortOnDrop {
 
 
 
+/// A more readable `!` operator
+#[cfg(any(test, feature="op-int-utils"))]
+#[inline(always)]
+pub fn not(val: bool) -> bool {
+    !val
+}

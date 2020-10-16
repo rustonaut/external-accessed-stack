@@ -4,11 +4,6 @@ use rand::Rng;
 
 use crate::*;
 
-#[inline]
-pub fn not(v: bool) -> bool {
-    !v
-}
-
 /// This is very similar to how this should be used except
 /// that we return a clone of the `op_int` and don't really
 /// do anything with it (and normally you have a second buffer
