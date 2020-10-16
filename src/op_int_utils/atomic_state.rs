@@ -11,7 +11,7 @@
 //!    `RABufferAnchor`. In this implementation `Completer` is not `Sync` (but `Send`) so only
 //!    one thread (or similar) can complete the operation.
 //!
-use core::{cell::UnsafeCell, marker::PhantomData, mem, pin::Pin, ptr, sync::atomic::AtomicU8, sync::atomic::Ordering, task::Poll, task::RawWaker, task::RawWakerVTable, task::Waker};
+use core::{cell::UnsafeCell, marker::PhantomData, mem::{self, ManuallyDrop}, pin::Pin, ptr, sync::atomic::AtomicU8, sync::atomic::Ordering, task::Poll, task::RawWaker, task::RawWakerVTable, task::Waker};
 use crate::{OperationInteraction, utils::not};
 
 /// Flags used for the atomic state machine.
@@ -350,8 +350,10 @@ impl<Result> Completer<Result> {
         //    as it won't accessed by the polling task anymore. So we take out the waker and
         //    return it.
 
+        // Make sure not to drop self.
+        let self_ = ManuallyDrop::new(self);
         //SAFE: By the outer unsafe contract this ptr must still be valid and properly aliased.
-        let anchor = &*self.ptr;
+        let anchor = &*self_.ptr;
         //SAFE: By the state machine we know we must currently own the slot
         ptr::replace(anchor.result_slot.get(), Some(result));
         // We need AcqRel here as we release the COMPLETED flag and acquire if we do now own
@@ -363,6 +365,12 @@ impl<Result> Completer<Result> {
         } else {
             None
         }
+    }
+}
+
+impl<Result> Drop for Completer<Result> {
+    fn drop(&mut self) {
+        panic!("Completer dropped without completing operation.")
     }
 }
 
