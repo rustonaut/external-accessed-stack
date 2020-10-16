@@ -1012,10 +1012,71 @@ macro_rules! ra_buffer_anchor {
     );
 }
 
+/// This type bundles a ptr and len into a type implementing `ReadBuffer` and `WriteBuffer`.
+///
+/// This can be useful if you have a DMA API which requires `'static` and uses buffer leaking
+/// for safety and you want (and can) to wrap it in a way which would work with a non-static
+/// [`RABufferHandle`] but you still need to pass in a `'static` buffer implementing the
+/// `ReadBuffer` and `WriteBuffer` traits.
+#[cfg(feature="embedded-dma")]
+pub struct UnsafeEmbeddedDMABuffer<V> {
+    ptr: *mut V,
+    len: usize
+}
 
 #[cfg(feature="embedded-dma")]
 const _: () =  {
     use embedded_dma::{ReadBuffer, WriteBuffer, Word};
+
+    impl<V> UnsafeEmbeddedDMABuffer<V> {
+
+        /// Create a new unsafe buffer.
+        ///
+        /// # Unsafe-Contract
+        ///
+        /// You must "somehow" make sure that for the whole lifetime of this
+        /// type ptr and len are valid.
+        unsafe fn new(ptr: *mut V, len: usize) -> Self {
+            Self { ptr, len }
+        }
+    }
+
+    unsafe impl<'a, V> ReadBuffer for UnsafeEmbeddedDMABuffer<V>
+    where
+        V: Word,
+    {
+        type Word = V;
+        unsafe fn read_buffer(&self) -> (*const V, usize) {
+            (self.ptr as *const V, self.len)
+        }
+    }
+
+    unsafe impl<'a, V> WriteBuffer for UnsafeEmbeddedDMABuffer<V>
+    where
+        V: Word,
+    {
+        type Word = V;
+        unsafe fn write_buffer(&mut self) -> (*mut V, usize) {
+            (self.ptr, self.len)
+        }
+    }
+
+    impl<'a, V, OpInt> RABufferHandle<'a, V, OpInt>
+    where
+        V: Word,
+        OpInt: OperationInteraction
+    {
+        /// Create a new unsafe buffer based on the underlying buffer.
+        ///
+        /// # Unsafe-Contract
+        ///
+        /// You must "somehow" make sure that for the whole lifetime of this
+        /// type ptr and len are valid.
+        pub unsafe fn unsafe_embedded_dma_buffer(&self) -> UnsafeEmbeddedDMABuffer<V> {
+            let (ptr, len) = self.get_buffer_ptr_and_len();
+            UnsafeEmbeddedDMABuffer::new(ptr, len)
+        }
+    }
 
     unsafe impl<'a, V, OpInt> ReadBuffer for RABufferHandle<'a, V, OpInt>
     where
@@ -1039,8 +1100,9 @@ const _: () =  {
             self.get_buffer_ptr_and_len()
         }
     }
-
 };
+
+
 
 
 #[cfg(test)]
