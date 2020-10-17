@@ -11,8 +11,8 @@
 //!    `RABufferAnchor`. In this implementation `Completer` is not `Sync` (but `Send`) so only
 //!    one thread (or similar) can complete the operation.
 //!
-use core::{cell::UnsafeCell, marker::PhantomData, mem::{self, ManuallyDrop}, pin::Pin, ptr, sync::atomic::AtomicU8, sync::atomic::Ordering, task::Poll, task::RawWaker, task::RawWakerVTable, task::Waker};
-use crate::{OperationInteraction, utils::not};
+use core::{cell::UnsafeCell, marker::PhantomData, mem::{self, ManuallyDrop}, pin::Pin, ptr, sync::atomic::AtomicU8, sync::atomic::Ordering, task::Context, task::Poll, task::Waker};
+use crate::{OperationInteraction, hooks::get_sync_awaiting_hook, utils::not};
 
 /// Flags used for the atomic state machine.
 mod flag {
@@ -245,14 +245,17 @@ unsafe impl<Result> OperationInteraction for Anchor<Result> {
     type Result = Result;
 
     fn make_sure_operation_ended(self: Pin<&Self>) {
-        //TODO add a way to inject a thread parking mechanism,
-        //     but as we don't know if there are threads we
-        //     can't implement it instead we can add a `AtomicUsize/Ptr`
-        //     based function hook.
-        let waker = no_op_waker();
-        while let Poll::Pending = self.poll(&waker) {
-            //TODO some kind of sleep/yield function injection
-            core::sync::atomic::spin_loop_hint();
+        let self_as_opaque_data = self.get_ref() as *const Self as *mut ();
+        let sync_awaiting = get_sync_awaiting_hook();
+
+        sync_awaiting((self_as_opaque_data, callback::<Result>));
+
+        fn callback<R>(data: *mut (), ctx: &mut Context) -> Poll<()> {
+            //SAFE: We have the guarantees that data was not touched.
+            let self_ = unsafe { &*(data as *const _ as *const Anchor<R>) };
+            //SAFE: recreates Pin which we know exists
+            let self_ = unsafe { Pin::new_unchecked(self_) };
+            self_.poll(ctx.waker()).map(|_res| ())
         }
     }
 
@@ -283,17 +286,6 @@ unsafe impl<Result> OperationInteraction for Anchor<Result> {
 /// it's actually completed and no more access to the underlying
 /// buffer is done.
 ///
-/// # Drop
-///
-/// Dropping this means no-longer being able to complete the
-/// ongoing operation, which entrails hanging your code.
-///
-/// As such this will panic on drop.
-///
-/// You can always `mem::forget`-it as it doesn't allocate
-/// any owned resources. (Through this will hang the code.)
-//FIXME: Instead of panic-ing here do set a "drop-before-completion"
-//       flag and then on `poll_completion` call the `hang_detected_hook`.
 #[derive(Debug)]
 pub struct Completer<Result> {
     ptr: *const  InnerAnchor<Result>,
@@ -368,37 +360,6 @@ impl<Result> Completer<Result> {
     }
 }
 
-impl<Result> Drop for Completer<Result> {
-    fn drop(&mut self) {
-        panic!("Completer dropped without completing operation.")
-    }
-}
-
-/// Returns a waker which does nothing on wake.
-fn no_op_waker() -> Waker {
-    let raw = raw_no_op_waker();
-    //SAFE: The raw waker returned by `raw_no_op_waker` is always valid
-    unsafe { Waker::from_raw(raw) }
-}
-
-/// Returns a valid raw waker which does nothing on safe.
-///
-/// # Safety
-///
-/// This must return a waker which always can be used with `Waker::from_raw`
-/// in a safe way without any additional constraints.
-fn raw_no_op_waker() -> RawWaker {
-    RawWaker::new(0 as *const (), &NO_OP_WAKER_VTABLE)
-}
-
-/// VTable for a waker which does nothing on waker.
-static NO_OP_WAKER_VTABLE: RawWakerVTable = {
-    fn clone(_: *const ()) -> RawWaker { raw_no_op_waker() }
-    fn wake(_: *const ()) {}
-    fn wake_by_ref(_: *const ()) {}
-    fn drop_waker(_: *const ()) {}
-    RawWakerVTable::new(clone, wake, wake_by_ref, drop_waker)
-};
 
 
 #[cfg(test)]

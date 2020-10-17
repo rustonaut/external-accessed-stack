@@ -5,8 +5,7 @@ authors = ["Philipp Korber <philipp@korber.dev>"]
 edition = "2018"
 
 [features]
-default = ["op-int-utils"]
-op-int-utils = []
+default = []
 
 [dependencies]
 pin-utils = "0.1.0"

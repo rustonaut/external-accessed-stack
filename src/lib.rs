@@ -465,11 +465,12 @@
 extern crate std;
 
 mod utils;
-#[cfg(feature="op-int-utils")]
+pub mod hooks;
 pub mod op_int_utils;
 
-use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, task::Context, task::Poll};
+use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr,  task::Context, task::Poll};
 use crate::utils::abort_on_panic;
+
 /// Trait for type allowing interaction with an ongoing operation
 ///
 /// # Unsafe-Contract

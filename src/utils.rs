@@ -1,5 +1,7 @@
 use core::mem;
 
+mod atomic_hook;
+pub use self::atomic_hook::*;
 
 // Abort on panic in closure, useful for cases where panic recovery is not possible.
 pub fn abort_on_panic<T>(func: impl FnOnce() -> T) -> T {
@@ -39,7 +41,6 @@ impl Drop for AbortOnDrop {
 
 
 /// A more readable `!` operator
-#[cfg(any(test, feature="op-int-utils"))]
 #[inline(always)]
 pub fn not(val: bool) -> bool {
     !val
