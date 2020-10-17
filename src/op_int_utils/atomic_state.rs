@@ -250,6 +250,12 @@ impl<Result> Anchor<Result> {
     }
 }
 
+impl<Result> Default for Anchor<Result> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 //SAFE: As long as the unsafe contract of the [`Completer.complete()`] method is uphold
 //      this is a safe implementation.
 unsafe impl<Result> OperationInteraction for Anchor<Result> {
@@ -314,7 +320,7 @@ impl<Result> Completer<Result> {
     /// if necessary. Use [`Completer.complete_operation_no_wake()`] to have
     /// a variant of this method which doesn't wake the waker.
     ///
-    /// # Unsafe-Contract
+    /// # Safety
     ///
     /// Caller must make sure that before this call:
     ///
@@ -334,6 +340,8 @@ impl<Result> Completer<Result> {
     }
 
     /// See [`Completer.complete_operation()`].
+    ///
+    /// # Safety
     ///
     /// The unsafe-contract is the exact same as [`Completer.complete_operation()`].
     ///

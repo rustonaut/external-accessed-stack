@@ -667,7 +667,7 @@ where
 {
     /// Create a new instance with given buffer.
     ///
-    /// # Unsafe-Contract
+    /// # Safety
     ///
     /// 1. You can pass any buffer in where you guarantee that it only can be re-purposed
     ///   after the anchor is dropped and that if the anchor is leaked the buffer is
@@ -732,8 +732,9 @@ impl<'a, V, OpInt> RABufferHandle<'a, V, OpInt>
 where
     OpInt: OperationInteraction,
 {
+    /// Create a new handle pinning the anchor to the stack.
     ///
-    /// # Unsafe-Contract
+    /// # Safety
     ///
     /// This calls [`Pin::new_unchecked()`] and inherites the unsafe contract from it.
     ///

@@ -14,7 +14,7 @@ pub fn no_op_waker() -> Waker {
 /// This must return a waker which always can be used with `Waker::from_raw`
 /// in a safe way without any additional constraints.
 pub fn raw_no_op_waker() -> RawWaker {
-    RawWaker::new(0 as *const (), &NO_OP_WAKER_VTABLE)
+    RawWaker::new(core::ptr::null(), &NO_OP_WAKER_VTABLE)
 }
 
 /// VTable for a waker which does nothing on waker.

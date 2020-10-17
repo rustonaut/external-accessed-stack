@@ -45,7 +45,7 @@ pub type SyncAwaitingHookPollFn = fn(OpaqueData, &mut Context) -> Poll<()>;
 /// Platforms can override this hook to inject thinks like yielding in the bussy loop or to
 /// use a thread parker.
 ///
-/// # Unsafe-Contract
+/// # Safety
 ///
 /// The caller of this function must make sure the hook is correctly implemented. This entails that:
 ///
