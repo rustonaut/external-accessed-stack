@@ -11,8 +11,19 @@
 //!    `RABufferAnchor`. In this implementation `Completer` is not `Sync` (but `Send`) so only
 //!    one thread (or similar) can complete the operation.
 //!
-use core::{cell::UnsafeCell, marker::PhantomData, mem::{self, ManuallyDrop}, pin::Pin, ptr, sync::atomic::AtomicU8, sync::atomic::Ordering, task::Context, task::Poll, task::Waker};
-use crate::{OperationInteraction, hooks::get_sync_awaiting_hook, utils::not};
+use crate::{hooks::get_sync_awaiting_hook, utils::not, OperationInteraction};
+use core::{
+    cell::UnsafeCell,
+    marker::PhantomData,
+    mem::{self, ManuallyDrop},
+    pin::Pin,
+    ptr,
+    sync::atomic::AtomicU8,
+    sync::atomic::Ordering,
+    task::Context,
+    task::Poll,
+    task::Waker,
+};
 
 /// Flags used for the atomic state machine.
 mod flag {
@@ -30,7 +41,6 @@ mod flag {
         (state & flag) != 0
     }
 }
-
 
 /// A utility which can be used to implement a [`OperationInteraction`].
 ///
@@ -58,7 +68,7 @@ mod flag {
 pub struct Anchor<Result> {
     inner: InnerAnchor<Result>,
     /// Marker to prevent `Sync`/`Send`
-    not_sync_send: PhantomData<*const ()>
+    not_sync_send: PhantomData<*const ()>,
 }
 
 /// The `AtomicStateAnchor` impl.
@@ -93,7 +103,7 @@ struct InnerAnchor<Result> {
     /// The completer will write the result and then set the flag, after
     /// this the anchor can read the result.
     ///
-    result_slot: UnsafeCell<Option<Result>>
+    result_slot: UnsafeCell<Option<Result>>,
 }
 
 /// SAFE: We do guard access with the sate_sync atomic, waker is Sync anyway.
@@ -102,7 +112,6 @@ struct InnerAnchor<Result> {
 unsafe impl<Result> Sync for InnerAnchor<Result> where Result: Send {}
 
 impl<Result> Anchor<Result> {
-
     /// Create a new anchor.
     ///
     /// The anchor will be pre-set in a `Waiting` state with no waker registered.
@@ -113,7 +122,7 @@ impl<Result> Anchor<Result> {
                 waker_slot: UnsafeCell::new(None),
                 result_slot: UnsafeCell::new(None),
             },
-            not_sync_send: PhantomData
+            not_sync_send: PhantomData,
         }
     }
 
@@ -132,9 +141,11 @@ impl<Result> Anchor<Result> {
     /// to trigger an abort.
     ///
     pub fn create_completer(self: Pin<&Self>) -> Completer<Result> {
-
         if let Err(state) = self.inner.state_sync.compare_exchange(
-            0, flag::INITIALIZED, Ordering::AcqRel, Ordering::Acquire
+            0,
+            flag::INITIALIZED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
         ) {
             panic!("Unexpected state when trying to create completer: {:b}\nCompleter must only be created once.", state);
         }
@@ -164,7 +175,7 @@ impl<Result> Anchor<Result> {
             flag::INITIALIZED,
             flag::INITIALIZED | flag::UPDATE_WAKER,
             Ordering::AcqRel,
-            Ordering::Acquire
+            Ordering::Acquire,
         );
 
         if let Err(state) = result {
@@ -184,7 +195,7 @@ impl<Result> Anchor<Result> {
             flag::INITIALIZED | flag::UPDATE_WAKER,
             flag::INITIALIZED,
             Ordering::AcqRel,
-            Ordering::Acquire
+            Ordering::Acquire,
         );
 
         // only drop old waker after un-setting the flag
@@ -212,10 +223,10 @@ impl<Result> Anchor<Result> {
     /// Must only be called if the `UPDATE_WAKER` flag is set.
     unsafe fn update_waker(&self, waker: &Waker) -> Option<Waker> {
         let slot = &mut *self.inner.waker_slot.get();
-        let waker_needs_update = slot.as_ref()
+        let waker_needs_update = slot
+            .as_ref()
             .map(|old_waker| !old_waker.will_wake(waker))
             .unwrap_or(true);
-
 
         if waker_needs_update {
             mem::replace(slot, Some(waker.clone()))
@@ -260,8 +271,9 @@ unsafe impl<Result> OperationInteraction for Anchor<Result> {
     }
 
     fn poll_completion(self: Pin<&Self>, cx: &mut core::task::Context) -> Poll<Self::Result> {
-        self.poll(cx.waker())
-            .map(|opt_result| opt_result.expect("Polled `poll_completion` after it returned `Ready`"))
+        self.poll(cx.waker()).map(|opt_result| {
+            opt_result.expect("Polled `poll_completion` after it returned `Ready`")
+        })
     }
 }
 
@@ -288,18 +300,14 @@ unsafe impl<Result> OperationInteraction for Anchor<Result> {
 ///
 #[derive(Debug)]
 pub struct Completer<Result> {
-    ptr: *const  InnerAnchor<Result>,
+    ptr: *const InnerAnchor<Result>,
 }
 
 /// SAFE: If the Result is `Send` InnerAnchor is `Sync` and we can `Send` the
 ///       handle to another thread to then send the result back.
-unsafe impl<Result> Send for Completer<Result>
-where
-    Result: Send,
-{}
+unsafe impl<Result> Send for Completer<Result> where Result: Send {}
 
 impl<Result> Completer<Result> {
-
     /// Marks the operation as completed and sends back the result.
     ///
     /// After marking the operation as completed this will call `Waker.wake()`
@@ -350,7 +358,9 @@ impl<Result> Completer<Result> {
         ptr::replace(anchor.result_slot.get(), Some(result));
         // We need AcqRel here as we release the COMPLETED flag and acquire if we do now own
         // the waker_slot.
-        let state = anchor.state_sync.fetch_or(flag::COMPLETED, Ordering::AcqRel);
+        let state = anchor
+            .state_sync
+            .fetch_or(flag::COMPLETED, Ordering::AcqRel);
         if not(flag::is_set(state, flag::UPDATE_WAKER)) {
             // SAFE: As the polling task wasn't currently accessing the waker slot we now own it
             ptr::replace(anchor.waker_slot.get(), None)
@@ -360,15 +370,17 @@ impl<Result> Completer<Result> {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::{sync::atomic::{AtomicUsize, Ordering}, task::Context, time::Duration};
+    use core::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::Context,
+        time::Duration,
+    };
 
-    use std::{sync::Arc, thread};
     use pin_utils::pin_mut;
+    use std::{sync::Arc, thread};
     use waker_fn::waker_fn;
 
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -399,7 +411,12 @@ mod tests {
         let completer = anchor.as_ref().create_completer();
 
         let cn = Arc::new(AtomicUsize::new(0));
-        let waker = waker_fn({let cn = cn.clone(); move || { cn.fetch_add(1, Ordering::SeqCst); } });
+        let waker = waker_fn({
+            let cn = cn.clone();
+            move || {
+                cn.fetch_add(1, Ordering::SeqCst);
+            }
+        });
         let mut ctx = Context::from_waker(&waker);
 
         let res = anchor.as_ref().poll_completion(&mut ctx);
@@ -407,7 +424,9 @@ mod tests {
         assert_eq!(cn.load(Ordering::SeqCst), 0);
 
         let result = OpaqueResult::default();
-        unsafe { completer.complete_operation(result.clone()); }
+        unsafe {
+            completer.complete_operation(result.clone());
+        }
         assert_eq!(cn.load(Ordering::SeqCst), 1);
 
         let res = anchor.as_ref().poll_completion(&mut ctx);
@@ -422,10 +441,20 @@ mod tests {
         let completer = anchor.as_ref().create_completer();
 
         let cn1 = Arc::new(AtomicUsize::new(0));
-        let waker1 = waker_fn({let cn1 = cn1.clone(); move || { cn1.fetch_add(1, Ordering::SeqCst); } });
+        let waker1 = waker_fn({
+            let cn1 = cn1.clone();
+            move || {
+                cn1.fetch_add(1, Ordering::SeqCst);
+            }
+        });
         let mut ctx1 = Context::from_waker(&waker1);
         let cn2 = Arc::new(AtomicUsize::new(0));
-        let waker2 = waker_fn({let cn2 = cn2.clone(); move || { cn2.fetch_add(1, Ordering::SeqCst); } });
+        let waker2 = waker_fn({
+            let cn2 = cn2.clone();
+            move || {
+                cn2.fetch_add(1, Ordering::SeqCst);
+            }
+        });
         let mut ctx2 = Context::from_waker(&waker2);
 
         let res = anchor.as_ref().poll_completion(&mut ctx1);
@@ -439,10 +468,11 @@ mod tests {
         assert_eq!(cn2.load(Ordering::SeqCst), 0);
 
         let result = OpaqueResult::default();
-        unsafe { completer.complete_operation(result.clone()); }
+        unsafe {
+            completer.complete_operation(result.clone());
+        }
         assert_eq!(cn1.load(Ordering::SeqCst), 0);
         assert_eq!(cn2.load(Ordering::SeqCst), 1);
-
 
         let waker3 = waker_fn(|| panic!("Poll leading to Ready should not wake waker."));
         let mut ctx3 = Context::from_waker(&waker3);
@@ -462,7 +492,9 @@ mod tests {
         let mut ctx = Context::from_waker(&waker);
 
         let result = OpaqueResult::default();
-        unsafe { completer.complete_operation(result.clone()); }
+        unsafe {
+            completer.complete_operation(result.clone());
+        }
 
         let _ = anchor.as_ref().poll_completion(&mut ctx);
         let _ = anchor.as_ref().poll_completion(&mut ctx);
@@ -477,7 +509,9 @@ mod tests {
         let mut ctx = Context::from_waker(&waker);
 
         let result = OpaqueResult::default();
-        unsafe { completer.complete_operation(result.clone()); }
+        unsafe {
+            completer.complete_operation(result.clone());
+        }
 
         let res = anchor.as_ref().poll_completion(&mut ctx);
         assert_eq!(res, Poll::Ready(result));
@@ -496,7 +530,9 @@ mod tests {
             let result = result.clone();
             move || {
                 thread::sleep(Duration::from_millis(10));
-                unsafe { completer.complete_operation(result); }
+                unsafe {
+                    completer.complete_operation(result);
+                }
             }
         });
 
@@ -505,8 +541,7 @@ mod tests {
                 assert_eq!(result, recv_result);
                 break;
             }
-        };
-
+        }
 
         let _ = join.join();
     }

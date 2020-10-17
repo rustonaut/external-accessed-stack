@@ -1,4 +1,8 @@
-use std::{cell::{RefCell, RefMut}, rc::Rc, vec::Vec};
+use std::{
+    cell::{RefCell, RefMut},
+    rc::Rc,
+    vec::Vec,
+};
 
 use rand::Rng;
 
@@ -8,7 +12,9 @@ use crate::*;
 /// that we return a clone of the `op_int` and don't really
 /// do anything with it (and normally you have a second buffer
 /// or target address or similar).
-pub async fn mock_operation<'a, T>(mut buffer: RABufferHandle<'a, T, OpIntMock>) -> (OperationHandle<'a,T, OpIntMock>, MockInfo) {
+pub async fn mock_operation<'a, T>(
+    mut buffer: RABufferHandle<'a, T, OpIntMock>,
+) -> (OperationHandle<'a, T, OpIntMock>, MockInfo) {
     buffer.cancellation().await;
     let (buffer_start, len) = buffer.get_buffer_ptr_and_len();
     let (op_int, start, mock_info) = OpIntMock::new(buffer_start, len);
@@ -29,10 +35,11 @@ pub struct OpIntMock {
 }
 
 impl OpIntMock {
-
-    pub fn new<T>(_buffer_start: *mut T,  _len: usize) -> (Self, impl FnOnce(), MockInfo) {
+    pub fn new<T>(_buffer_start: *mut T, _len: usize) -> (Self, impl FnOnce(), MockInfo) {
         let mock_info: Rc<RefCell<_>> = Default::default();
-        let op_int = OpIntMock { mock_info: mock_info.clone()  };
+        let op_int = OpIntMock {
+            mock_info: mock_info.clone(),
+        };
         let start_op = || {};
         (op_int, start_op, MockInfo { mock_info })
     }
@@ -46,8 +53,7 @@ impl OpIntMock {
 }
 
 impl Drop for OpIntMock {
-
-    fn drop(&mut self)  {
+    fn drop(&mut self) {
         let mut mock_info = self.fixed_address_mock_call();
         mock_info.was_dropped = true;
     }
@@ -113,17 +119,15 @@ impl Default for CallInfo {
             called_make_sure_operation_ended: false,
             called_poll_request_cancellation: false,
             called_poll_completion: false,
-            yields_before_cancel_ready: rng.gen_range(0,5),
-            yields_before_completion_ready: rng.gen_range(0,5),
+            yields_before_cancel_ready: rng.gen_range(0, 5),
+            yields_before_completion_ready: rng.gen_range(0, 5),
             was_dropped: false,
             op_int_addr: Vec::new(),
         }
     }
 }
 
-
 impl MockInfo {
-
     pub fn assert_was_dropped(&self) {
         let mock_info = self.mock_info.borrow();
         assert!(mock_info.was_dropped);
@@ -155,7 +159,6 @@ impl MockInfo {
         assert_eq!(mock_info.called_make_sure_operation_ended, false);
         assert_eq!(mock_info.called_poll_request_cancellation, true);
         assert_eq!(mock_info.called_poll_completion, false);
-
     }
 
     pub fn assert_op_ended_enforced(&self) {
@@ -168,6 +171,9 @@ impl MockInfo {
         if mock_info.op_int_addr.is_empty() {
             panic!("No operation on op int was called, can't do addr eq.");
         }
-        assert!(mock_info.op_int_addr.iter().all(|call_addr| *call_addr == addr));
+        assert!(mock_info
+            .op_int_addr
+            .iter()
+            .all(|call_addr| *call_addr == addr));
     }
 }

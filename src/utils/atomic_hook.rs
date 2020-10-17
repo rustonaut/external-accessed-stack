@@ -1,4 +1,8 @@
-use core::{marker::PhantomData, mem, sync::atomic::{AtomicUsize, Ordering}};
+use core::{
+    marker::PhantomData,
+    mem,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 /// Trait to set default functions, workaround to not being able to have fn-ptr's in const fns
 pub trait AtomicHookSettings {
@@ -44,7 +48,7 @@ macro_rules! define_atomic_hooks {
 /// - `fn(A,B) -> C` => `fn((A,B)) -> C` => `AtomicHook<(A,B), C>`
 pub struct AtomicHook<Settings>
 where
-    Settings: AtomicHookSettings
+    Settings: AtomicHookSettings,
 {
     //FIXME: Check if there is a single architecture with a function pointer size which
     //       is not the normal pointer size and which supports C99. We have no guarantee
@@ -60,16 +64,13 @@ where
     #[doc(hidden)]
     pub(crate) ptr: AtomicUsize,
     #[doc(hidden)]
-    pub(crate) marker: PhantomData<fn(Settings::Param) -> Settings::Ret>
+    pub(crate) marker: PhantomData<fn(Settings::Param) -> Settings::Ret>,
 }
-
-
 
 impl<Settings> AtomicHook<Settings>
 where
-    Settings: AtomicHookSettings
+    Settings: AtomicHookSettings,
 {
-
     fn fn_to_usize(func: fn(Settings::Param) -> Settings::Ret) -> usize {
         func as usize
     }
@@ -100,14 +101,15 @@ where
     }
 
     /// Replace given atomic hook
-    pub fn replace(&self, new_hook: fn(Settings::Param) -> Settings::Ret) -> fn(Settings::Param) -> Settings::Ret {
+    pub fn replace(
+        &self,
+        new_hook: fn(Settings::Param) -> Settings::Ret,
+    ) -> fn(Settings::Param) -> Settings::Ret {
         let fnptr_as_usize = self.ptr.swap(Self::fn_to_usize(new_hook), Ordering::AcqRel);
         //SAFE: Requires to be called with values from self.ptr only.
         unsafe { Self::usize_to_fn(fnptr_as_usize) }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -134,8 +136,12 @@ mod tests {
             static TEST_HOOK: AtomicHook<DefaultTestFn: fn(u8) -> u8> = default_test_fn;
         }
 
-        fn replace_fn(v: u8) -> u8 { v + 25 }
-        fn replace_fn2(v: u8) -> u8 { v + 32 }
+        fn replace_fn(v: u8) -> u8 {
+            v + 25
+        }
+        fn replace_fn2(v: u8) -> u8 {
+            v + 32
+        }
         let old_fn = TEST_HOOK.replace(replace_fn);
         let current = TEST_HOOK.get();
         assert_eq!(old_fn(7), 25);

@@ -27,7 +27,6 @@ impl Drop for PanicOnDrop {
     }
 }
 
-
 struct AbortOnDrop;
 
 impl Drop for AbortOnDrop {
@@ -36,9 +35,6 @@ impl Drop for AbortOnDrop {
         abort();
     }
 }
-
-
-
 
 /// A more readable `!` operator
 #[inline(always)]

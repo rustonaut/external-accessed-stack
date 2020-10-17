@@ -1,7 +1,9 @@
-use core::{sync::atomic::spin_loop_hint, task::{Context, Poll}};
+use core::{
+    sync::atomic::spin_loop_hint,
+    task::{Context, Poll},
+};
 
 use crate::{define_atomic_hooks, op_int_utils::no_op_waker};
-
 
 define_atomic_hooks! {
     /// The sync awaiting hook has unsafe constraints and is as such
@@ -34,7 +36,6 @@ pub type OpaqueData = *mut ();
 /// See [`replace_sync_awaiting_hook()`] for guarantees a hook implementation must give
 /// on a rust-safety level.
 pub type SyncAwaitingHookPollFn = fn(OpaqueData, &mut Context) -> Poll<()>;
-
 
 /// Sets a new syn awaiting hook.
 ///
@@ -109,7 +110,6 @@ pub fn get_sync_awaiting_hook() -> SynAwaitingHook {
     SYNC_AWAITING_HOOK.get()
 }
 
-
 /// Default implementation which just busy polls for completion.
 //TODO: cfg if feature="std" use thread parking
 fn default_sync_awaiting_hook((data, poll_fn): (OpaqueData, SyncAwaitingHookPollFn)) {
@@ -147,6 +147,5 @@ mod tests {
                 }
             }
         }
-
     }
 }

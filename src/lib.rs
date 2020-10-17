@@ -464,12 +464,15 @@
 #[macro_use]
 extern crate std;
 
-mod utils;
 pub mod hooks;
 pub mod op_int_utils;
+mod utils;
 
-use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr,  task::Context, task::Poll};
 use crate::utils::abort_on_panic;
+use core::{
+    cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, task::Context,
+    task::Poll,
+};
 
 /// Trait for type allowing interaction with an ongoing operation
 ///
@@ -485,7 +488,6 @@ use crate::utils::abort_on_panic;
 /// See the method documentation of [`OperationInteraction.make_sure_operation_ended()`] for more
 /// details.
 pub unsafe trait OperationInteraction {
-
     /// Type of which value is returned on completion.
     ///
     /// A value which indicates which the operation failed or succeeded can returned.
@@ -594,7 +596,6 @@ pub struct RABufferAnchor<'a, V, OpInt>
 where
     OpInt: OperationInteraction,
 {
-
     /// We store the buffer as a tuple of a pointer to it's start and it's length.
     ///
     /// The reason for this are:
@@ -657,15 +658,13 @@ where
     /// waker of an future polling on `poll_completion` and waking it (
     /// assuming the async runtime implements wake in a way which can
     /// be called from an interrupt).
-    operation_interaction: UnsafeCell<Option<ManuallyDrop<OpInt>>>
+    operation_interaction: UnsafeCell<Option<ManuallyDrop<OpInt>>>,
 }
-
 
 impl<'a, V, OpInt> RABufferAnchor<'a, V, OpInt>
 where
-    OpInt: OperationInteraction
+    OpInt: OperationInteraction,
 {
-
     /// Create a new instance with given buffer.
     ///
     /// # Unsafe-Contract
@@ -698,7 +697,7 @@ where
 
 impl<'a, V, OpInt> Drop for RABufferAnchor<'a, V, OpInt>
 where
-    OpInt: OperationInteraction
+    OpInt: OperationInteraction,
 {
     fn drop(&mut self) {
         // Safe: We are about to drop self and can guarantee it's no longer moved before drop
@@ -716,7 +715,7 @@ where
 /// TODO: Acts like a `Pin`
 pub struct RABufferHandle<'a, V, OpInt>
 where
-    OpInt: OperationInteraction
+    OpInt: OperationInteraction,
 {
     /// WARNING: While we have a `Pin<&Anchor>` it should be treated as
     ///          a `Pin<&mut Anchor>` wrt. to most aspects except that
@@ -726,14 +725,13 @@ where
     ///          This means we must not expose the underlying `Pin` or
     ///          a [`Pin.as_ref()`] based re-borrow. A [`Pin.as_mut()`]
     ///          based re-borrow is fine.
-    anchor: Pin<&'a RABufferAnchor<'a, V, OpInt>>
+    anchor: Pin<&'a RABufferAnchor<'a, V, OpInt>>,
 }
 
 impl<'a, V, OpInt> RABufferHandle<'a, V, OpInt>
 where
-    OpInt: OperationInteraction
+    OpInt: OperationInteraction,
 {
-
     ///
     /// # Unsafe-Contract
     ///
@@ -745,9 +743,9 @@ where
     /// Similar to `pin_utils::pin_mut!` it's fully safe if this is directly used after
     /// creating a `RABufferAnchor` on the stack and we shadow the variable the anchor
     /// was created in.
-    pub unsafe fn new_unchecked<'b>(anchor: &'a mut RABufferAnchor<'b,V,OpInt>) -> Self
+    pub unsafe fn new_unchecked<'b>(anchor: &'a mut RABufferAnchor<'b, V, OpInt>) -> Self
     where
-        'b: 'a
+        'b: 'a,
     {
         // lifetime collapse (erase the longer living 'b and replace it with the
         // shorter living 'a also restore covariance, which is fine as we basically
@@ -765,7 +763,9 @@ where
 
     /// Re-borrows the handle in the same way you would re-borrow a `&mut T` ref.
     pub fn reborrow(&mut self) -> RABufferHandle<V, OpInt> {
-        RABufferHandle { anchor: self.anchor }
+        RABufferHandle {
+            anchor: self.anchor,
+        }
     }
 
     /// Returns a reference to the underlying operation interaction instance.
@@ -780,9 +780,7 @@ where
         //      or the operation completed and `cleanup_operation()` is called. But `cleanup_operation`
         //      uses a `&mut self` and as such can not be called while the operation interaction
         //      is borrowed.
-        let op_int = unsafe {
-            &*self.anchor.operation_interaction.get()
-        };
+        let op_int = unsafe { &*self.anchor.operation_interaction.get() };
         let op_int = op_int.as_ref().map(|man_drop| {
             let op_int: &OpInt = &*man_drop;
             //Safe: operation interaction is pinned through the anchor pin
@@ -790,7 +788,6 @@ where
         });
         op_int
     }
-
 
     /// Returns a mut reference to the underling buffer.
     ///
@@ -807,11 +804,8 @@ where
         let (ptr, len) = self.anchor.buffer;
         // Safe: We have a (pinned) &mut borrow to the anchor and we made
         //       sure it's completed (completion always calls `cleanup_operation`).
-        unsafe {
-            core::slice::from_raw_parts_mut(ptr, len)
-        }
+        unsafe { core::slice::from_raw_parts_mut(ptr, len) }
     }
-
 
     /// Return a pointer to the start of the the underlying buffer and it's size.
     ///
@@ -841,7 +835,10 @@ where
     /// 2. You pass in the right `OperationInteraction` instance which guarantees
     ///    that once its `make_sure_operation_ended` method returns the operation
     ///    does no longer access the buffer in any form.
-    pub unsafe fn try_register_new_operation(self, new_op_int: OpInt) -> Result<OperationHandle<'a, V, OpInt>, ()> {
+    pub unsafe fn try_register_new_operation(
+        self,
+        new_op_int: OpInt,
+    ) -> Result<OperationHandle<'a, V, OpInt>, ()> {
         if self.has_pending_operation() {
             Err(())
         } else {
@@ -963,17 +960,15 @@ where
 /// Type wrapping a `RABufferHandle` which has a currently ongoing operation.
 pub struct OperationHandle<'a, V, OpInt>
 where
-    OpInt: OperationInteraction
+    OpInt: OperationInteraction,
 {
-    anchor: RABufferHandle<'a, V, OpInt>
+    anchor: RABufferHandle<'a, V, OpInt>,
 }
-
 
 impl<'a, 'r, V, OpInt> OperationHandle<'a, V, OpInt>
 where
-    OpInt: OperationInteraction
+    OpInt: OperationInteraction,
 {
-
     /// See [`RABufferAnchor.completion()`]
     pub async fn completion(mut self) -> Option<OpInt::Result> {
         self.anchor.completion().await
@@ -994,8 +989,6 @@ where
         self.anchor.operation_interaction()
     }
 }
-
-
 
 #[macro_export]
 macro_rules! ra_buffer_anchor {
@@ -1019,18 +1012,17 @@ macro_rules! ra_buffer_anchor {
 /// for safety and you want (and can) to wrap it in a way which would work with a non-static
 /// [`RABufferHandle`] but you still need to pass in a `'static` buffer implementing the
 /// `ReadBuffer` and `WriteBuffer` traits.
-#[cfg(feature="embedded-dma")]
+#[cfg(feature = "embedded-dma")]
 pub struct UnsafeEmbeddedDMABuffer<V> {
     ptr: *mut V,
-    len: usize
+    len: usize,
 }
 
-#[cfg(feature="embedded-dma")]
-const _: () =  {
-    use embedded_dma::{ReadBuffer, WriteBuffer, Word};
+#[cfg(feature = "embedded-dma")]
+const _: () = {
+    use embedded_dma::{ReadBuffer, Word, WriteBuffer};
 
     impl<V> UnsafeEmbeddedDMABuffer<V> {
-
         /// Create a new unsafe buffer.
         ///
         /// # Unsafe-Contract
@@ -1065,7 +1057,7 @@ const _: () =  {
     impl<'a, V, OpInt> RABufferHandle<'a, V, OpInt>
     where
         V: Word,
-        OpInt: OperationInteraction
+        OpInt: OperationInteraction,
     {
         /// Create a new unsafe buffer based on the underlying buffer.
         ///
@@ -1103,9 +1095,6 @@ const _: () =  {
     }
 };
 
-
-
-
 #[cfg(test)]
 mod mock_operation;
 
@@ -1114,9 +1103,9 @@ mod tests {
     #![allow(non_snake_case)]
 
     mod usage_patterns {
-        use core::mem;
         use super::super::*;
         use crate::mock_operation::*;
+        use core::mem;
 
         #[async_std::test]
         async fn leaked_operations_get_canceled_and_ended_before_new_operations() {
@@ -1157,7 +1146,6 @@ mod tests {
                     mem::forget(buffer);
                 }
 
-
                 let (mut op, mi) = call_op(buffer).await;
                 mi.assert_not_run();
                 // We just indicate cancellation but don't wait for
@@ -1174,7 +1162,8 @@ mod tests {
                 //  but we still will wait for completion but now blocking int he Drop destructor.
                 //  ...
                 mi
-            }.await;
+            }
+            .await;
             // ...
             // So here after the drop the op has ended. (As a side note,
             // assert_cancellation/completion_run calls assert_end_op_check_run).
@@ -1187,7 +1176,9 @@ mod tests {
             mock_info
         }
 
-        async fn call_op<'a>(buffer: RABufferHandle<'a, u8, OpIntMock>) -> (OperationHandle<'a, u8, OpIntMock>, MockInfo) {
+        async fn call_op<'a>(
+            buffer: RABufferHandle<'a, u8, OpIntMock>,
+        ) -> (OperationHandle<'a, u8, OpIntMock>, MockInfo) {
             mock_operation(buffer).await
         }
     }
@@ -1260,7 +1251,8 @@ mod tests {
             async fn does_drop_the_operation_in_place() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
                 let (_op, mock) = mock_operation(buffer.reborrow()).await;
-                let op_int_addr = buffer.reborrow()
+                let op_int_addr = buffer
+                    .reborrow()
                     .operation_interaction()
                     .map(|pin| pin.get_ref() as *const _)
                     .unwrap();
@@ -1278,7 +1270,7 @@ mod tests {
             async fn return_the_right_pointer_and_len() {
                 let mut buffer = [0u8; 32];
                 let buffer = &mut buffer;
-                let buff_ptr = buffer as *mut _ as  *mut u8;
+                let buff_ptr = buffer as *mut _ as *mut u8;
                 let buff_len = buffer.len();
 
                 let mut anchor = unsafe { RABufferAnchor::<_, OpIntMock>::new_unchecked(buffer) };
@@ -1365,7 +1357,6 @@ mod tests {
                 mock.assert_cancellation_run();
             }
 
-
             #[async_std::test]
             async fn makes_sure_that_operation_ended() {
                 ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
@@ -1398,7 +1389,6 @@ mod tests {
                 mock.assert_was_dropped();
             }
         }
-
     }
 
     mod OperationHandle {

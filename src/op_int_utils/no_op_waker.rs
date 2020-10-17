@@ -19,7 +19,9 @@ pub fn raw_no_op_waker() -> RawWaker {
 
 /// VTable for a waker which does nothing on waker.
 static NO_OP_WAKER_VTABLE: RawWakerVTable = {
-    fn clone(_: *const ()) -> RawWaker { raw_no_op_waker() }
+    fn clone(_: *const ()) -> RawWaker {
+        raw_no_op_waker()
+    }
     fn wake(_: *const ()) {}
     fn wake_by_ref(_: *const ()) {}
     fn drop_waker(_: *const ()) {}
