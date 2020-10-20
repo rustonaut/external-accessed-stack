@@ -6,6 +6,8 @@ edition = "2018"
 
 [features]
 default = []
+std = ["futures-lite/std"]
+#implicite: embedded-dma = []
 
 [dependencies]
 pin-utils = "0.1.0"

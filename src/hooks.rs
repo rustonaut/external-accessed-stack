@@ -1,9 +1,6 @@
-use core::{
-    sync::atomic::spin_loop_hint,
-    task::{Context, Poll},
-};
+use core::task::{Context, Poll};
 
-use crate::{define_atomic_hooks, op_int_utils::no_op_waker};
+use crate::define_atomic_hooks;
 
 define_atomic_hooks! {
     /// The sync awaiting hook has unsafe constraints and is as such
@@ -75,6 +72,10 @@ pub unsafe fn replace_sync_awaiting_hook(new_hook: SynAwaitingHook) -> SynAwaiti
 ///
 /// # Default
 ///
+/// ## `not(feature="std")`
+///
+/// By default (not the `std` feature enabled) following is the default implementation:
+///
 /// ```
 /// # use core::{sync::atomic::spin_loop_hint, task::{Context, Poll}};
 /// # use remote_accessed_buffer::{op_int_utils::no_op_waker, hooks::*};
@@ -86,8 +87,27 @@ pub unsafe fn replace_sync_awaiting_hook(new_hook: SynAwaitingHook) -> SynAwaiti
 ///     }
 /// }
 /// ```
+///
 /// Which is the most basic viable implementation you can have, it's recommended to
 /// override it with a more efficient platform/target dependent implementation.
+///
+/// ## `feature="std"`
+///
+/// If the `std` feature is enabled following implementation is used instead:
+///
+/// ```
+/// # use remote_accessed_buffer::{op_int_utils::no_op_waker, hooks::*};
+/// #
+/// fn default_sync_awaiting_hook((data, poll): (OpaqueData, SyncAwaitingHookPollFn)) {
+///     use futures_lite::future::{block_on, poll_fn};
+///
+///     // Completes the future, uses thread parking.
+///     // In difference to e.g. `async-std`'s `block_on` this one does *not* start
+///     // a executor and reactor or anything similar but just polls the given future
+///     // on the stack using thread parking on `Poll::Pending` and unparking as `Waker.wake()`.
+///     block_on(poll_fn(|ctx| poll(data, ctx)));
+/// }
+/// ```
 ///
 /// # Safety
 ///
@@ -111,13 +131,28 @@ pub fn get_sync_awaiting_hook() -> SynAwaitingHook {
 }
 
 /// Default implementation which just busy polls for completion.
-//TODO: cfg if feature="std" use thread parking
-fn default_sync_awaiting_hook((data, poll_fn): (OpaqueData, SyncAwaitingHookPollFn)) {
+#[cfg(not(feature="std"))]
+fn default_sync_awaiting_hook((data, poll): (OpaqueData, SyncAwaitingHookPollFn)) {
+    use core::sync::atomic::spin_loop_hint;
+    use crate::op_int_utils::no_op_waker;
+
     let waker = no_op_waker();
     let mut ctx = Context::from_waker(&waker);
-    while let Poll::Pending = poll_fn(data, &mut ctx) {
+    while let Poll::Pending = poll(data, &mut ctx) {
         spin_loop_hint();
     }
+}
+
+#[cfg(feature="std")]
+fn default_sync_awaiting_hook((data, poll): (OpaqueData, SyncAwaitingHookPollFn)) {
+    use futures_lite::future::{block_on, poll_fn};
+
+    // Completes the future, uses thread parking.
+    // In difference to e.g. `async-std`'s `block_on` this one does *not* start
+    // a executor and reactor or anything similar but just polls the given future
+    // on the stack using thread parking on `Poll::Pending` and unparking as `Waker.wake()`.
+    //SAFETY: block_on does poll the future until it returns `Read(_)`.
+    block_on(poll_fn(|ctx| poll(data, ctx)));
 }
 
 #[cfg(test)]
@@ -134,18 +169,36 @@ mod tests {
 
             assert_eq!(counter, 5);
 
-            fn poll_fn(data: *mut (), _ctx: &mut Context) -> Poll<()> {
+            fn poll_fn(data: *mut (), ctx: &mut Context) -> Poll<()> {
                 //SAFE:
                 //  - data is guaranteed to be passed through
                 //  - poll_fn is guaranteed to only be called during the callback it was passed to
                 let data: &mut u8 = unsafe { &mut *(data as *mut u8) };
                 if *data > 5 {
                     *data -= 1;
+                    wake_me(ctx);
                     Poll::Pending
                 } else {
                     Poll::Ready(())
                 }
             }
+        }
+
+        #[cfg(not(feature="std"))]
+        fn wake_me(_ctx: &mut Context) {
+            //on `no_std` we don't need waking because we busy poll
+        }
+
+        #[cfg(feature="std")]
+        fn wake_me(ctx: &mut Context) {
+            use std::{thread::{spawn, sleep}, time::Duration};
+
+            let waker = ctx.waker().clone();
+            spawn(move || {
+                sleep(Duration::from_millis(10));
+                waker.wake();
+            });
+
         }
     }
 }
