@@ -28,7 +28,6 @@ pub async fn mock_operation<'a, T>(
     (op_handle, mock_info)
 }
 
-//TODO also track dropping
 #[derive(Debug)]
 pub struct OpIntMock {
     pub mock_info: Rc<RefCell<CallInfo>>,

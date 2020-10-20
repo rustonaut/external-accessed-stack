@@ -706,13 +706,28 @@ where
     }
 }
 
-/// TODO TODO TODO
+/// Handle to access the stack pinned buffer.
 ///
-/// TODO: Variance as if &'a mut [..]
-///       Which means covariance over 'a and invariance over
-///       V and OpInt
+/// You can use this handle in two ways:
 ///
-/// TODO: Acts like a `Pin`
+/// - As if it's a `&mut buffer`, using [`RABufferHandle.reborrow()`] is used for reborrowing.
+/// - Passing around a `&mut handle` treating it roughly as if it is the buffer itself.
+///
+/// The handler provides a variety of mostly `&mut self` and `async` methods to access the
+/// buffer, wait for completion of ongoing operations, request the cancellation of ongoing
+/// operation and register new operations.
+///
+/// Most methods even such which you would normally be `&self` are `&mut self` as they need
+/// `&mut` aliasing guarantees due to necessary internal book keeping.
+///
+/// **Normally, you don't want to create this manual but instead use the `ra_buffer_anchor`
+/// macro to create the buffer, anchor and handle at once in a guaranteed to be safe way.**
+///
+///
+/// This type contains a (stack) pinned reference to the anchor and through this to the buffer.
+/// This type acts roughly as a (stack) `Pin<&mut Anchor>` (through due to limitations of rust
+/// and other implementation details it uses a `Pin<&Anchor>` + interior mutability and access
+/// only through `&mut self` methods.)
 pub struct RABufferHandle<'a, V, OpInt>
 where
     OpInt: OperationInteraction,
@@ -1440,9 +1455,3 @@ mod tests {
         }
     }
 }
-
-//TODO integration test with:
-//  a slice of allocated memory
-//  a future copied onto that memory
-//  a thread based write to mem
-// so that we can check if we can write to mem after drop

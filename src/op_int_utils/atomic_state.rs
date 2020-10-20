@@ -282,14 +282,6 @@ unsafe impl<Result> OperationInteraction for Anchor<Result> {
         })
     }
 }
-
-//TODO: Consider adding a "abort on hang" option which aborts on
-//      .make_sure_operation_completed() calls if the Completer was
-//      dropped without calling .complete_operation().
-//
-//      We could have a `AtomicUsize`/`AtomicPtr` containing a function
-//      which is called on "async_hang_detected()" and called on
-//      "sync_hang_detected()".
 /// A [`Completer`] for a given `op_int_utils::atomic_state::Anchor`.
 ///
 /// For any [`Anchor`] there is always only at most one completer.
