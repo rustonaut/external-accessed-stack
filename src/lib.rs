@@ -808,6 +808,8 @@ where
     /// Returns a mut reference to the underling buffer.
     ///
     /// If a operations is currently in process it first awaits the end of the operation.
+    /// This will not try to cancel the operation. Any result of returned on completion *will
+    /// be dropped*. So run `completion().await` beforehand if you need the result.
     ///
     /// This will not try to cancel any ongoing operation. If you need that you
     /// should await [`RABuffer::request_cancellation()`] before calling this
@@ -985,14 +987,20 @@ impl<'a, 'r, V, OpInt> OperationHandle<'a, V, OpInt>
 where
     OpInt: OperationInteraction,
 {
-    /// See [`RABufferAnchor.completion()`]
-    pub async fn completion(mut self) -> Option<OpInt::Result> {
-        self.anchor.completion().await
+    /// See [`RABufferAnchor.completion()`].
+    pub async fn completion(mut self) -> OpInt::Result {
+        //SAFE[UNWRAP]: We unique borrow/own the RABufferHandle through this type
+        //              and the type guarantees that there is an "ongoing" operation
+        //              and we consume this type in this function call.
+        self.anchor.completion().await.unwrap()
     }
 
     /// See [`RABufferAnchor.cancellation()`]
-    pub async fn cancellation(mut self) -> Option<OpInt::Result> {
-        self.anchor.cancellation().await
+    pub async fn cancellation(mut self) -> OpInt::Result {
+        //SAFE[UNWRAP]: We unique borrow/own the RABufferHandle through this type
+        //              and the type guarantees that there is an "ongoing" operation
+        //              and we consume this type in this function call.
+        self.anchor.cancellation().await.unwrap()
     }
 
     /// See [`RABufferAnchor.request_cancellation()`]
@@ -1013,12 +1021,12 @@ macro_rules! ra_buffer_anchor {
         // SAFE:
         // 1. We can use the buffer as it's directly on the stack above the anchor
         // 2. We directly pin the anchor to the stack as it's required.
-        let mut $name = unsafe { RABufferAnchor::<_, $OpInt>::new_unchecked(&mut $name) };
+        let mut $name = unsafe { $crate::RABufferAnchor::<_, $OpInt>::new_unchecked(&mut $name) };
         // SAFE:
         // 1. Works like `pin_mut!` we shadow the same stack allocated buffer to prevent any non-pinned
         //    access to it.
         //FIXME: Update SAFE doc
-        let mut $name = unsafe { RABufferHandle::new_unchecked(&mut $name) };
+        let mut $name = unsafe { $crate::RABufferHandle::new_unchecked(&mut $name) };
     );
 }
 
@@ -1029,7 +1037,7 @@ macro_rules! ra_buffer_anchor {
 /// [`RABufferHandle`] but you still need to pass in a `'static` buffer implementing the
 /// `ReadBuffer` and `WriteBuffer` traits.
 #[cfg(feature = "embedded-dma")]
-pub struct UnsafeEmbeddedDMABuffer<V> {
+pub struct UnsafeEmbeddedDmaBuffer<V> {
     ptr: *mut V,
     len: usize,
 }
@@ -1038,7 +1046,9 @@ pub struct UnsafeEmbeddedDMABuffer<V> {
 const _: () = {
     use embedded_dma::{ReadBuffer, Word, WriteBuffer};
 
-    impl<V> UnsafeEmbeddedDMABuffer<V> {
+    unsafe impl<V>  Send for UnsafeEmbeddedDmaBuffer<V> where V: Send {}
+
+    impl<V> UnsafeEmbeddedDmaBuffer<V> {
         /// Create a new unsafe buffer.
         ///
         /// # Unsafe-Contract
@@ -1050,7 +1060,7 @@ const _: () = {
         }
     }
 
-    unsafe impl<'a, V> ReadBuffer for UnsafeEmbeddedDMABuffer<V>
+    unsafe impl<'a, V> ReadBuffer for UnsafeEmbeddedDmaBuffer<V>
     where
         V: Word,
     {
@@ -1060,7 +1070,7 @@ const _: () = {
         }
     }
 
-    unsafe impl<'a, V> WriteBuffer for UnsafeEmbeddedDMABuffer<V>
+    unsafe impl<'a, V> WriteBuffer for UnsafeEmbeddedDmaBuffer<V>
     where
         V: Word,
     {
@@ -1081,9 +1091,9 @@ const _: () = {
         ///
         /// You must "somehow" make sure that for the whole lifetime of this
         /// type ptr and len are valid.
-        pub unsafe fn unsafe_embedded_dma_buffer(&self) -> UnsafeEmbeddedDMABuffer<V> {
+        pub unsafe fn unsafe_embedded_dma_buffer(&self) -> UnsafeEmbeddedDmaBuffer<V> {
             let (ptr, len) = self.get_buffer_ptr_and_len();
-            UnsafeEmbeddedDMABuffer::new(ptr, len)
+            UnsafeEmbeddedDmaBuffer::new(ptr, len)
         }
     }
 

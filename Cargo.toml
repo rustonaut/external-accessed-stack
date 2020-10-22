@@ -9,6 +9,11 @@ default = []
 std = ["futures-lite/std"]
 #implicite: embedded-dma = []
 
+[[test]]
+name = "stm32f4xx"
+path = "tests/use-case/stm32f4xx/main.rs"
+required-features = ["embedded-dma"]
+
 [dependencies]
 pin-utils = "0.1.0"
 futures-lite = { version="1.11.0", default-features=false }
@@ -18,3 +23,4 @@ embedded-dma = { version="0.1.2", optional=true }
 rand = "0.7.3"
 async-std = { version="1.6.5", features=["attributes"] }
 waker-fn = "1.1.0"
+embedded-dma = "0.1.2"

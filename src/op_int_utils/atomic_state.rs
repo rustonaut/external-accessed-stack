@@ -368,6 +368,31 @@ impl<Result> Completer<Result> {
             None
         }
     }
+
+    /// Turns the completer into a usize.
+    ///
+    /// Warning: This  must not be used to clone the completer, this is just a utility to
+    ///          allow it to be used with `AtomicUsize`
+    pub fn into_usize(self) -> usize {
+        let Self { ptr } = self;
+        ptr as usize
+    }
+
+    /// Creates a completer from a usize created by `Self.into_usize()`.
+    ///
+    /// # Safety
+    ///
+    /// 1. The usize must have been created with [`Completer.into_usize()`],
+    ///    note that the **exact** same `Self` type must have been used. I.e.
+    ///    having the same `Result` type.
+    /// 2. This must not be used to create copies of the completer, the caller
+    ///    must guarantee that for a given completer which was turned into a usize
+    ///    only at most one "re-created" completer exist at any point in time.
+    ///
+    pub unsafe fn from_usize(ptr: usize) -> Self {
+        let ptr = mem::transmute(ptr);
+        Completer { ptr }
+    }
 }
 
 #[cfg(test)]
