@@ -1,7 +1,7 @@
 use std::{sync::atomic::AtomicUsize, any::TypeId, cell::UnsafeCell, pin::Pin};
 
 use futures_lite::future::block_on;
-use remote_accessed_buffer::{OperationHandle, OperationInteraction, RABufferHandle, UnsafeEmbeddedDmaBuffer, op_int_utils::atomic_state, ra_buffer_anchor};
+use remote_accessed_buffer::{OperationHandle, OperationInteraction, RABufferHandle, UnsafeEmbeddedDmaBuffer, op_int_utils::atomic_state, ra_buffer};
 use fake_dma::{Singletons, create_singletons, Stream, Periphery, Transfer, S1, FooBarPeriphery};
 
 mod fake_dma;
@@ -14,25 +14,28 @@ fn use_case_emulation() {
         let Singletons { s1, foo_bar_periphery:mut peri } = create_singletons();
 
 
-        ra_buffer_anchor!(buffer = [0u8; 32] of DMAAnchor<S1, FooBarPeriphery>);
+        ra_buffer!(buffer = [0u8; 32] of DMAAnchor<S1, FooBarPeriphery>);
 
         peri.replace_data(vec![23; 30]);
 
         let handle = start_copy_data_to_buffer(buffer.reborrow(), s1, peri).await;
-        let (s1, mut peri) = handle.completion().await;
-        let buffer_ref = buffer.buffer_mut().await;
-        for byte in &buffer_ref[..30] {
-            assert_eq!(*byte, 23);
-        }
-        for byte in &buffer_ref[30..] {
-            assert_eq!(*byte, 0);
-        }
+        // to avoid the closure buffer.get_buffer_after_completion and buffer.try_get_buffer_mut()
+        // and similar can be used, see below.
+        let (s1, mut peri) = handle.get_buffer_after_completion(|buffer_mut, res| {
+            for byte in &buffer_mut[..30] {
+                assert_eq!(*byte, 23);
+            }
+            for byte in &buffer_mut[30..] {
+                assert_eq!(*byte, 0);
+            }
+            res
+        }).await;
 
         peri.replace_data(vec![42; 32]);
-        let handle = start_copy_data_to_buffer(buffer.reborrow(), s1, peri).await;
-        let (_s,_peri) = handle.completion().await;
-        let buffer_ref = buffer.buffer_mut().await;
-        for byte in &buffer_ref[..] {
+        start_copy_data_to_buffer(buffer.reborrow(), s1, peri).await;
+
+        let (buffer_mut, _opt_res) = buffer.get_buffer_after_completion().await;
+        for byte in &buffer_mut[..] {
             assert_eq!(*byte, 42);
         }
     });

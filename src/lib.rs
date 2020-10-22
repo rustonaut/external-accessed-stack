@@ -33,7 +33,7 @@
 //! - Given that there is currently no async destructor it is recommended
 //!   to do a `buffer.completion().await` (or `cancellation()`) at the
 //!   end of the stack frame you created the anchor on (e.g. at the
-//!   end of the function you called `ra_buffer_anchor!(..)`) to
+//!   end of the function you called `ra_buffer!(..)`) to
 //!   prevent any unnecessary blocking during drop in the case where
 //!   there is still a ongoing operation.
 //!
@@ -128,7 +128,7 @@
 //! can make it safe to use the buffer with completion based I/O like e.g. DMA.
 //!
 //! To explain this better lets look at following code as if produced by the
-//! `ra_buffer_anchor!(buffer = [0u8; 32] of DMAInteraction)` code:
+//! `ra_buffer!(buffer = [0u8; 32] of DMAInteraction)` code:
 //!
 //! ```no_run
 //! # use core::{pin::Pin, task::{Context, Poll}};
@@ -720,7 +720,7 @@ where
 /// Most methods even such which you would normally be `&self` are `&mut self` as they need
 /// `&mut` aliasing guarantees due to necessary internal book keeping.
 ///
-/// **Normally, you don't want to create this manual but instead use the `ra_buffer_anchor`
+/// **Normally, you don't want to create this manual but instead use the `ra_buffer`
 /// macro to create the buffer, anchor and handle at once in a guaranteed to be safe way.**
 ///
 ///
@@ -808,8 +808,8 @@ where
     /// Returns a mut reference to the underling buffer.
     ///
     /// If a operations is currently in process it first awaits the end of the operation.
-    /// This will not try to cancel the operation. Any result of returned on completion *will
-    /// be dropped*. So run `completion().await` beforehand if you need the result.
+    /// This will not try to cancel the operation. The result and a mut-ref to the underlying
+    /// buffer is returned.
     ///
     /// This will not try to cancel any ongoing operation. If you need that you
     /// should await [`RABuffer::request_cancellation()`] before calling this
@@ -817,12 +817,34 @@ where
     ///
     /// Note that there is no `buffer`/`buffer_ref` as we always need a `&mut self`
     /// anyway to access the buffer.
-    pub async fn buffer_mut(&mut self) -> &mut [V] {
-        self.reborrow().completion().await;
+    pub async fn get_buffer_after_completion(&mut self) -> (&mut [V], Option<OpInt::Result>) {
+        let res = self.reborrow().completion().await;
         let (ptr, len) = self.anchor.buffer;
-        // Safe: We have a (pinned) &mut borrow to the anchor and we made
-        //       sure it's completed (completion always calls `cleanup_operation`).
-        unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+        //SAFE: no ongoing operation means no self-references so &mut self is enough
+        let buffer = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
+        (buffer, res)
+    }
+
+    /// Returns a mut reference to the underlying buffer if there is no ongoing operation
+    pub fn try_get_buffer_mut(&mut self) -> Option<&mut [V]> {
+        if self.has_pending_operation() {
+            None
+        } else {
+            let (ptr, len) = self.anchor.buffer;
+            //SAFE: no ongoing operation means no self-references so &mut self is enough
+            Some(unsafe { core::slice::from_raw_parts_mut(ptr, len) })
+        }
+    }
+
+    /// Returns a reference to the underlying buffer if there is no ongoing operation
+    pub fn try_get_buffer(&self) -> Option<&[V]> {
+        if self.has_pending_operation() {
+            None
+        } else {
+            let (ptr, len) = self.anchor.buffer;
+            //SAFE: no ongoing operation means no self-references so &self is enough
+            Some(unsafe { core::slice::from_raw_parts(ptr, len) })
+        }
     }
 
     /// Return a pointer to the start of the the underlying buffer and it's size.
@@ -987,7 +1009,16 @@ impl<'a, 'r, V, OpInt> OperationHandle<'a, V, OpInt>
 where
     OpInt: OperationInteraction,
 {
-    /// See [`RABufferAnchor.completion()`].
+
+    /// See [`RABufferHandle.get_buffer_after_completion()`]
+    ///
+    /// But needs a closure as we can't return a &mut [V] in a method consuming self.
+    pub async fn get_buffer_after_completion<R>(mut self, buffer_access: impl FnOnce(&mut [V], OpInt::Result) -> R) -> R {
+        let (buffer, res) = self.anchor.get_buffer_after_completion().await;
+        buffer_access(buffer, res.unwrap())
+    }
+
+    /// See [`RABufferHandle.completion()`].
     pub async fn completion(mut self) -> OpInt::Result {
         //SAFE[UNWRAP]: We unique borrow/own the RABufferHandle through this type
         //              and the type guarantees that there is an "ongoing" operation
@@ -995,7 +1026,7 @@ where
         self.anchor.completion().await.unwrap()
     }
 
-    /// See [`RABufferAnchor.cancellation()`]
+    /// See [`RABufferHandle.cancellation()`]
     pub async fn cancellation(mut self) -> OpInt::Result {
         //SAFE[UNWRAP]: We unique borrow/own the RABufferHandle through this type
         //              and the type guarantees that there is an "ongoing" operation
@@ -1003,19 +1034,19 @@ where
         self.anchor.cancellation().await.unwrap()
     }
 
-    /// See [`RABufferAnchor.request_cancellation()`]
+    /// See [`RABufferHandle.request_cancellation()`]
     pub async fn request_cancellation(&mut self) {
         self.anchor.request_cancellation().await;
     }
 
-    /// See [`RABufferAnchor.operation_interaction()`]
+    /// See [`RABufferHandle.operation_interaction()`]
     pub fn operation_interaction(&self) -> Option<Pin<&OpInt>> {
         self.anchor.operation_interaction()
     }
 }
 
 #[macro_export]
-macro_rules! ra_buffer_anchor {
+macro_rules! ra_buffer {
     ($name:ident = [$init:literal; $len:literal] of $OpInt:ty) => (
         let mut $name = [$init; $len];
         // SAFE:
@@ -1136,7 +1167,7 @@ mod tests {
         #[async_std::test]
         async fn leaked_operations_get_canceled_and_ended_before_new_operations() {
             let mi = async {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
 
                 // If we leaked the op we still can poll on the buffer directly
                 let mi = call_and_leak_op(buffer.reborrow()).await;
@@ -1217,7 +1248,7 @@ mod tests {
 
             #[async_std::test]
             async fn fails_if_a_operation_is_still_pending() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
 
                 let (_, mock) = mock_operation(buffer.reborrow()).await;
 
@@ -1231,7 +1262,7 @@ mod tests {
 
             #[async_std::test]
             async fn sets_the_operation() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (ptr, len) = buffer.reborrow().get_buffer_ptr_and_len();
                 let (op_int, _, mock) = OpIntMock::new(ptr, len);
                 let res = unsafe { buffer.reborrow().try_register_new_operation(op_int) };
@@ -1247,7 +1278,7 @@ mod tests {
 
             #[async_std::test]
             async fn does_not_change_anything_if_there_was_no_pending_operation() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (ptr, len) = buffer.reborrow().get_buffer_ptr_and_len();
                 let has_op = buffer.reborrow().has_pending_operation();
 
@@ -1263,7 +1294,7 @@ mod tests {
 
             #[async_std::test]
             async fn does_make_sure_the_operation_completed_without_moving() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (_op, mock) = mock_operation(buffer.reborrow()).await;
                 let op_int_addr = buffer
                     .operation_interaction()
@@ -1275,7 +1306,7 @@ mod tests {
 
             #[async_std::test]
             async fn does_drop_the_operation_in_place() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (_op, mock) = mock_operation(buffer.reborrow()).await;
                 let op_int_addr = buffer
                     .reborrow()
@@ -1314,7 +1345,7 @@ mod tests {
 
             #[async_std::test]
             async fn returns_true_if_there_is_a_not_cleaned_up_operation() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 assert!(not(buffer.reborrow().has_pending_operation()));
                 let (op, _mock) = mock_operation(buffer.reborrow()).await;
                 assert!(op.anchor.has_pending_operation());
@@ -1329,7 +1360,7 @@ mod tests {
 
             #[async_std::test]
             async fn awaits_the_poll_request_cancellation_function_on_the_op_int_instance() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.request_cancellation().await;
@@ -1343,7 +1374,7 @@ mod tests {
 
             #[async_std::test]
             async fn polls_op_int_poll_completion() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.completion().await;
@@ -1352,7 +1383,7 @@ mod tests {
 
             #[async_std::test]
             async fn makes_sure_to_make_sure_operation_actually_did_end() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.completion().await;
@@ -1362,7 +1393,7 @@ mod tests {
 
             #[async_std::test]
             async fn makes_sure_to_clean_up_after_completion() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.completion().await;
@@ -1376,7 +1407,7 @@ mod tests {
 
             #[async_std::test]
             async fn polls_op_int_poll_request_cancellation_and_complete() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.cancellation().await;
@@ -1385,7 +1416,7 @@ mod tests {
 
             #[async_std::test]
             async fn makes_sure_that_operation_ended() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 buffer.cancellation().await;
@@ -1394,7 +1425,7 @@ mod tests {
             }
             #[async_std::test]
             async fn makes_sure_to_clean_up() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.reborrow()).await;
                 buffer.cancellation().await;
                 mock.assert_was_dropped();
@@ -1407,9 +1438,9 @@ mod tests {
 
             #[async_std::test]
             async fn buffer_access_awaits_completion() {
-                ra_buffer_anchor!(buffer = [12u32; 32] of OpIntMock);
+                ra_buffer!(buffer = [12u32; 32] of OpIntMock);
                 let (_, mock) = mock_operation(buffer.reborrow()).await;
-                let mut_ref = buffer.buffer_mut().await;
+                let (mut_ref, _) = buffer.get_buffer_after_completion().await;
                 assert_eq!(mut_ref, &mut [12u32; 32] as &mut [u32]);
                 mock.assert_completion_run();
                 mock.assert_was_dropped();
@@ -1426,7 +1457,7 @@ mod tests {
             // we know this forwards so we only test if it forward to the right place
             #[async_std::test]
             async fn polls_op_int_poll_completion() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (op, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 op.completion().await;
@@ -1441,7 +1472,7 @@ mod tests {
             // we know this forwards so we only test if it forward to the right place
             #[async_std::test]
             async fn polls_op_int_poll_request_cancellation() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (mut op, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 op.request_cancellation().await;
@@ -1456,7 +1487,7 @@ mod tests {
             // we know this forwards so we only test if it forward to the right place
             #[async_std::test]
             async fn polls_op_int_poll_request_cancellation() {
-                ra_buffer_anchor!(buffer = [0u8; 32] of OpIntMock);
+                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
                 let (op, mock) = mock_operation(buffer.reborrow()).await;
                 mock.assert_not_run();
                 op.cancellation().await;
