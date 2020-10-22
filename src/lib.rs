@@ -469,10 +469,7 @@ pub mod op_int_utils;
 mod utils;
 
 use crate::utils::abort_on_panic;
-use core::{
-    cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, task::Context,
-    task::Poll,
-};
+use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, marker::PhantomPinned, pin::Pin, ptr, task::Context, task::Poll};
 
 /// Trait for type allowing interaction with an ongoing operation
 ///
@@ -610,7 +607,17 @@ where
     ///    `OperationInteraction` instance for it was registered).
     ///
     buffer: (*mut V, usize),
-    buffer_type_hint: PhantomData<&'a mut [V]>,
+
+    /// Combination of necessary type hints:
+    ///
+    /// 1. This type pseudo contains (is) a `&'a mut [V]` so we type hint that to
+    ///    make sure there is no problem with variance, lifetimes or drop check.
+    ///
+    /// 2. Make sure it does NOT implement `Unpin`. `Unpin` is implemented for nearly everything
+    ///    so if you need `!Unpin` you need to nearly always opt to explicitly hint this using
+    ///    `PhantomPinned`.  The reason this type must be `!Unpin` is because in some situations
+    ///    there will be something like self-references to it.
+    buffer_type_hint: PhantomData<(&'a mut [V], PhantomPinned)>,
 
     /// Type to interact with ongoing operations.
     ///
