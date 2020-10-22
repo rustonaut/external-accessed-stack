@@ -1,5 +1,5 @@
 [package]
-name = "remote_accessed_buffer"
+name = "external-accessed-buffer"
 version = "0.1.0"
 authors = ["Philipp Korber <philipp@korber.dev>"]
 edition = "2018"

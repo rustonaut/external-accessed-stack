@@ -13,7 +13,7 @@ use crate::*;
 /// do anything with it (and normally you have a second buffer
 /// or target address or similar).
 pub async fn mock_operation<'a, T>(
-    mut buffer: RABufferHandle<'a, T, OpIntMock>,
+    mut buffer: EABufferHandle<'a, T, OpIntMock>,
 ) -> (OperationHandle<'a, T, OpIntMock>, MockInfo) {
     buffer.cancellation().await;
     let (buffer_start, len) = buffer.get_buffer_ptr_and_len();

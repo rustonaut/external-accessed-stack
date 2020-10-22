@@ -23,12 +23,12 @@
 //!
 //! # Usage-Recommendation
 //!
-//! - You can pass around a `&mut RABufferHandle` which is in many situations the easiest thing
+//! - You can pass around a `&mut EABufferHandle` which is in many situations the easiest thing
 //!   to do. Alternatively you can treat it similar to a `&mut Buffer` reference, but as there
-//!   are no automatic re-borrows for custom types you will need to use the [`RABufferHandle.reborrow()`]
+//!   are no automatic re-borrows for custom types you will need to use the [`EABufferHandle.reborrow()`]
 //!   method. The benefit of the later is that it's easier to write methods for it as you only have a
-//!   single covariant lifetime in the [`RABufferHandle`] instead of having a covariant lifetime
-//!   in the `&mut` and a invariant lifetime in the [`RABufferHandle`]
+//!   single covariant lifetime in the [`EABufferHandle`] instead of having a covariant lifetime
+//!   in the `&mut` and a invariant lifetime in the [`EABufferHandle`]
 //!
 //! - Given that there is currently no async destructor it is recommended
 //!   to do a `buffer.completion().await` (or `cancellation()`) at the
@@ -39,7 +39,7 @@
 //!
 //! # Principle (short/TL;DR)
 //!
-//! The [`RABufferHandle`] pins the [`RABufferAnchor`] to the stack.
+//! The [`EABufferHandle`] pins the [`EABufferAnchor`] to the stack.
 //!
 //! Due to the way `Pin` works and the unsafe contract of the buffer
 //! constructor we can be assured that `Drop` of the anchor is called
@@ -51,7 +51,7 @@
 //! We always implicitly await the completion of an operation before
 //! (semantically) reclaiming the ownership of the stack buffer.
 //!
-//! For example [`RABufferHandle.buffer_mut()`] hands out a `&mut [V]`
+//! For example [`EABufferHandle.buffer_mut()`] hands out a `&mut [V]`
 //! to the underlying buffer but first will await that any ongoing
 //! operation completed.
 //!
@@ -116,7 +116,7 @@
 //! which are most easily fulfilled by placing the buffer directly onto the stack above
 //! the anchor.
 //!
-//! Furthermore it requires the anchor to only be accessible through the [`RABufferHandle`]
+//! Furthermore it requires the anchor to only be accessible through the [`EABufferHandle`]
 //! which wraps the `Pin`. (This is best done the same way `pin_utils::pin_mut!` works.)
 //!
 //! With that we can guarantee that either both the anchor and buffer leak together which
@@ -132,7 +132,7 @@
 //!
 //! ```no_run
 //! # use core::{pin::Pin, task::{Context, Poll}};
-//! # use remote_accessed_buffer::*;
+//! # use external_accessed_buffer::*;
 //! # struct DMAInteraction;
 //! # unsafe impl OperationInteraction for DMAInteraction {
 //! #   type Result = ();
@@ -144,11 +144,11 @@
 //! // SAFE:
 //! // 1. We can use the buffer as it's directly on the stack above the anchor
 //! // 2. We directly pin the anchor to the stack as it's required.
-//! let mut buffer = unsafe { RABufferAnchor::<_, DMAInteraction>::new_unchecked(&mut buffer) };
+//! let mut buffer = unsafe { EABufferAnchor::<_, DMAInteraction>::new_unchecked(&mut buffer) };
 //! // SAFE:
 //! // 1. Works like `pin_mut!` we shadow the same stack allocated buffer to prevent any non-pinned
-//! //    access to it. (The pin is is wrapped in the `RABufferHandle`.)
-//! let mut buffer = unsafe { RABufferHandle::new_unchecked(&mut buffer) };
+//! //    access to it. (The pin is is wrapped in the `EABufferHandle`.)
+//! let mut buffer = unsafe { EABufferHandle::new_unchecked(&mut buffer) };
 //! ```
 //!
 //! Here by having the array buffer on the same stack as the anchor and making the buffer
@@ -176,23 +176,23 @@
 //! Because of this it's strongly recommended to make sure that under normal circumstances
 //! `buffer.completion().await` or `buffer.cancellation().await` is run before dropping it.
 //!
-//! ## Why `RABufferHandle` instead of a `Pin`.
+//! ## Why `EABufferHandle` instead of a `Pin`.
 //!
 //! There are two reasons for it:
 //!
 //! - Usability(1): We can implement the necessary methods on the handle, which means we
 //!   can have methods based on `&mut self` and `&self` taking advantage of the borrow
 //!   checker _and_ providing better UX. (You still can directly reborrow the handle using
-//!   [`RABufferHandle.reborrow()`] in the same way you could reborrow a `Pin` using
+//!   [`EABufferHandle.reborrow()`] in the same way you could reborrow a `Pin` using
 //!   [`Pin.as_mut()`]).
 //!
 //! - Usability(2): Instead of having two lifetimes which need to be handled correctly we
-//!   only have one.I.e. `Pin<&'covar mut RABufferAnchor<'invar, V, OpInt>>` vs.
-//!   `RABufferHandle<'covar, V, OpInt>`.
+//!   only have one.I.e. `Pin<&'covar mut EABufferAnchor<'invar, V, OpInt>>` vs.
+//!   `EABufferHandle<'covar, V, OpInt>`.
 //!
 //! - Rust limitations as mentioned in [Issue #63818](https://github.com/rust-lang/rust/issues/63818).
-//!   This forces us the use a `Pin<&RABufferAnchor<..>>` and interiour mutability instead of
-//!   an `Pin<&mut RABufferAnchor>` but the handle should behave like a `&mut Buffer` wrt. the
+//!   This forces us the use a `Pin<&EABufferAnchor<..>>` and interiour mutability instead of
+//!   an `Pin<&mut EABufferAnchor>` but the handle should behave like a `&mut Buffer` wrt. the
 //!   lifetime variance/re-borrowing. I.e. there should only be one (not borrowed) `&mut` to
 //!   the handle at any point in time (for better ease of use, not safety).
 //!   As such we wrapped pinned reference in a custom handle type.
@@ -206,16 +206,16 @@
 //! "upstream" in the pinned anchor. This mean we can guarantee to have access to it until
 //! we explicitly remove it because we realized the operation ended.
 //!
-//! The `OperationHandle` just wraps the used `RABufferHandle` to have a
+//! The `OperationHandle` just wraps the used `EABufferHandle` to have a
 //! way to encode that fact that there is a ongoing operation in the type system.
 //!
 //! You can always drop the `OperationHandle` handle which will literally have no affect
 //! on the operation itself.
 //!
-//! The reason for this is that we anyway can access the `RABufferHandle`
+//! The reason for this is that we anyway can access the `EABufferHandle`
 //! while a operation is ongoing by using re-borrows + (safe) leaking. In the end awaiting
 //! completion/cancellation on the `OperationHandle` just forwards it the the same named
-//! methods on `RABufferHandle`!
+//! methods on `EABufferHandle`!
 //!
 //! ## How do we make sure that an operation can't override another?
 //!
@@ -228,14 +228,14 @@
 //!
 //! ## How can we access the buffer safely outside of operations?
 //!
-//! There are two methods [`RABufferHandle.buffer_mut()`] and [`RABufferAnchor.buffer_ref()`]
+//! There are two methods [`EABufferHandle.buffer_mut()`] and [`EABufferAnchor.buffer_ref()`]
 //! which return a `&mut [V]`/`&[V]` after awaiting completion of any still ongoing
 //! operation.
 //!
 //! ## Guarantees for the passed in buffer
 //!
 //! Before we slightly glossed over the guarantees a buffer passed in to
-//! [`RABufferAnchor.new_unchecked()`] must give, *because it's strongly
+//! [`EABufferAnchor.new_unchecked()`] must give, *because it's strongly
 //! recommended to always place it direct above the anchor on the same
 //! stack*.
 //!
@@ -277,9 +277,9 @@
 //!     // 1. We do guarantee buffer to be on the same stack frame
 //!     //    (due to how we pin the future to the outside stack on which also the buffer is).
 //!     // 2. We shadow and pin it afterwards
-//!     let mut buffer = unsafe { RABufferAnchor::<_, DMAInteraction>::new_unchecked(&mut buffer); };
+//!     let mut buffer = unsafe { EABufferAnchor::<_, DMAInteraction>::new_unchecked(&mut buffer); };
 //!     // Safe: For the same reasons `pin_utils::pin_mut!` is safe.
-//!     let mut buffer = unsafe { RABufferHandle::new_unchecked(&mut buffer) };
+//!     let mut buffer = unsafe { EABufferHandle::new_unchecked(&mut buffer) };
 //!     do_some_dma_magic(buffer.reborrow()).await;
 //!     // make sure we properly await any pending operation aboves method might not have
 //!     // awaited the completion on, so that we don't block on drop (through that kinda doesn't
@@ -300,23 +300,23 @@
 //!
 //! This section contains some information for API implementers which do want to use this buffer.
 //!
-//! - The [`RABufferHandle.try_register_new_operation()`] method can be used to register a new operation.
+//! - The [`EABufferHandle.try_register_new_operation()`] method can be used to register a new operation.
 //!
 //! - As it will fail if there is still a ongoing operation ist recommended that the method calling register
 //!   does a `buffer.cancellation().await`.  Or in some special cases a `buffer..completion().await`.
 //!   But generally starting a new operation should cancel ongoing operations which have
-//!   not yet been completed if possible. Only the [`RABufferHandle.buffer_mut()`]
+//!   not yet been completed if possible. Only the [`EABufferHandle.buffer_mut()`]
 //!   method does implicitly awaiting of completion instead of cancellation as this is much better wrt.
 //!   usability.
 //!
-//! - A operation must only start *after* [`RABufferHandle.try_register_new_operation()`] returned successfully.
+//! - A operation must only start *after* [`EABufferHandle.try_register_new_operation()`] returned successfully.
 //!
 //! - Semantically the ownership of the buffer is passed to whatever executes the operation until it completes.
 //!   This is also why the anchor stores a pointer instead of a reference to the buffer. It's best to think
 //!   completion based background operations done by a DMA-controller or the OS kernel as if they are done
 //!   by a different thread over which you have no control over. At least wrt. `Sync`/`Send` requirements.
 //!
-//! - To make it easier to build operations the [`RABufferHandle.get_buffer_ptr_and_len()`] method
+//! - To make it easier to build operations the [`EABufferHandle.get_buffer_ptr_and_len()`] method
 //!   can be called *before* starting a new operation. **But the returned ptr MUST NOT be dereferenced before
 //!   the operation starts.**. Even if you just created a reference but don't use it it's already a violation
 //!   of the unsafe contract (this is necessary due to how compliers treat references wrt. optimizations).
@@ -331,7 +331,7 @@
 //!   pointers *into* the [`OperationInteraction`] instance to whatever does execute the operation. This is safe as
 //!   similar to the buffer the [`OperationInteraction`] instance won't be dropped before the operation completes.
 //!
-//! - The [`RABufferAnchor.operation_interaction()`] method can be used to get a pinned borrow to the current
+//! - The [`EABufferAnchor.operation_interaction()`] method can be used to get a pinned borrow to the current
 //!   operation interaction. This is useful to setup/start the operation after having already registered it.
 //!   It's also the only way to get a pointer to it's pinned memory location.
 //!
@@ -378,7 +378,7 @@
 //! ```ignore
 //! // call like `start_dma_operation(buffer.reborrow(), Direction::FromMemory, Periphery::FooBarDataPort).await;`
 //! async fn start_dma_operation<'a, T, C >(
-//!     mut buffer: RABufferHandle<'a, T::Word, DMAInteraction>,
+//!     mut buffer: EABufferHandle<'a, T::Word, DMAInteraction>,
 //!     direction: Direction,
 //!     channel: C, //the lifetime sucks bad time, we will fix that in newer version
 //!     target: T
@@ -592,7 +592,7 @@ pub unsafe trait OperationInteraction {
 //Note: I could use #[pin_project] but I have additional
 //      restrictions for `operation_interaction` and need
 //      to project into the option. So it's not worth it.
-pub struct RABufferAnchor<'a, V, OpInt>
+pub struct EABufferAnchor<'a, V, OpInt>
 where
     OpInt: OperationInteraction,
 {
@@ -661,7 +661,7 @@ where
     operation_interaction: UnsafeCell<Option<ManuallyDrop<OpInt>>>,
 }
 
-impl<'a, V, OpInt> RABufferAnchor<'a, V, OpInt>
+impl<'a, V, OpInt> EABufferAnchor<'a, V, OpInt>
 where
     OpInt: OperationInteraction,
 {
@@ -673,21 +673,21 @@ where
     ///   after the anchor is dropped and that if the anchor is leaked the buffer is
     ///   guaranteed to be leaked, too.
     ///
-    /// 2. You must `Pin` the anchor by using the `RABufferHandle` type and make sure it's
+    /// 2. You must `Pin` the anchor by using the `EABufferHandle` type and make sure it's
     ///    pinned in a way that `1.` is still uphold.
     ///
     /// It **very strongly** recommended always do following:
     ///
     /// 1. Have the buffer on the stack directly above the anchor.
-    /// 2. `Pin` the anchor using [`RABufferHandle::new_unchecked()`] to the stack immediately after
+    /// 2. `Pin` the anchor using [`EABufferHandle::new_unchecked()`] to the stack immediately after
     ///    constructing it
-    /// 3. Use the `RABufferHandle` to shadow the anchor.
+    /// 3. Use the `EABufferHandle` to shadow the anchor.
     ///
     /// This is the most simple way to guarantee the unsafe contract is uphold.
     ///
     /// See module level documentation for more details.
     pub unsafe fn new_unchecked(buffer: &'a mut [V]) -> Self {
-        RABufferAnchor {
+        EABufferAnchor {
             buffer_type_hint: PhantomData,
             buffer: (buffer as *mut _ as *mut V, buffer.len()),
             operation_interaction: UnsafeCell::new(None),
@@ -695,13 +695,13 @@ where
     }
 }
 
-impl<'a, V, OpInt> Drop for RABufferAnchor<'a, V, OpInt>
+impl<'a, V, OpInt> Drop for EABufferAnchor<'a, V, OpInt>
 where
     OpInt: OperationInteraction,
 {
     fn drop(&mut self) {
         // Safe: We are about to drop self and can guarantee it's no longer moved before drop
-        let mut handle = unsafe { RABufferHandle::new_unchecked(self) };
+        let mut handle = unsafe { EABufferHandle::new_unchecked(self) };
         handle.cleanup_operation();
     }
 }
@@ -710,7 +710,7 @@ where
 ///
 /// You can use this handle in two ways:
 ///
-/// - As if it's a `&mut buffer`, using [`RABufferHandle.reborrow()`] is used for reborrowing.
+/// - As if it's a `&mut buffer`, using [`EABufferHandle.reborrow()`] is used for reborrowing.
 /// - Passing around a `&mut handle` treating it roughly as if it is the buffer itself.
 ///
 /// The handler provides a variety of mostly `&mut self` and `async` methods to access the
@@ -728,7 +728,7 @@ where
 /// This type acts roughly as a (stack) `Pin<&mut Anchor>` (through due to limitations of rust
 /// and other implementation details it uses a `Pin<&Anchor>` + interior mutability and access
 /// only through `&mut self` methods.)
-pub struct RABufferHandle<'a, V, OpInt>
+pub struct EABufferHandle<'a, V, OpInt>
 where
     OpInt: OperationInteraction,
 {
@@ -740,10 +740,10 @@ where
     ///          This means we must not expose the underlying `Pin` or
     ///          a [`Pin.as_ref()`] based re-borrow. A [`Pin.as_mut()`]
     ///          based re-borrow is fine.
-    anchor: Pin<&'a RABufferAnchor<'a, V, OpInt>>,
+    anchor: Pin<&'a EABufferAnchor<'a, V, OpInt>>,
 }
 
-impl<'a, V, OpInt> RABufferHandle<'a, V, OpInt>
+impl<'a, V, OpInt> EABufferHandle<'a, V, OpInt>
 where
     OpInt: OperationInteraction,
 {
@@ -754,12 +754,12 @@ where
     /// This calls [`Pin::new_unchecked()`] and inherites the unsafe contract from it.
     ///
     /// Furthermore this must be used correctly as described in the unsafe-contract from
-    /// `RABufferAnchor::new_unchecked()`.
+    /// `EABufferAnchor::new_unchecked()`.
     ///
     /// Similar to `pin_utils::pin_mut!` it's fully safe if this is directly used after
-    /// creating a `RABufferAnchor` on the stack and we shadow the variable the anchor
+    /// creating a `EABufferAnchor` on the stack and we shadow the variable the anchor
     /// was created in.
-    pub unsafe fn new_unchecked<'b>(anchor: &'a mut RABufferAnchor<'b, V, OpInt>) -> Self
+    pub unsafe fn new_unchecked<'b>(anchor: &'a mut EABufferAnchor<'b, V, OpInt>) -> Self
     where
         'b: 'a,
     {
@@ -769,17 +769,17 @@ where
         // completely abstract way the fact that there is an additional indirection
         // in the anchor). If we could not do so as following we would have turned the
         // handle into a fat pointer directly pointing the both the anchor and the buffer!
-        let anchor: &'a RABufferAnchor<'a, V, OpInt> = anchor;
+        let anchor: &'a EABufferAnchor<'a, V, OpInt> = anchor;
         // Safe: because of
         //   - the guarantees given when calling this function
         //   - the guarantees given when creating the anchor
         let anchor = Pin::new_unchecked(anchor);
-        RABufferHandle { anchor }
+        EABufferHandle { anchor }
     }
 
     /// Re-borrows the handle in the same way you would re-borrow a `&mut T` ref.
-    pub fn reborrow(&mut self) -> RABufferHandle<V, OpInt> {
-        RABufferHandle {
+    pub fn reborrow(&mut self) -> EABufferHandle<V, OpInt> {
+        EABufferHandle {
             anchor: self.anchor,
         }
     }
@@ -812,7 +812,7 @@ where
     /// buffer is returned.
     ///
     /// This will not try to cancel any ongoing operation. If you need that you
-    /// should await [`RABuffer::request_cancellation()`] before calling this
+    /// should await [`EABuffer::request_cancellation()`] before calling this
     /// method.
     ///
     /// Note that there is no `buffer`/`buffer_ref` as we always need a `&mut self`
@@ -852,10 +852,10 @@ where
     /// # Safety
     ///
     /// You must guarantee that you only use the pointer after you installed
-    /// a appropriate `OperationInteraction` with [`RABufferAnchor.try_register_new_operation()`].
+    /// a appropriate `OperationInteraction` with [`EABufferAnchor.try_register_new_operation()`].
     ///
     /// The reason why we have this unsafe method instead of returning the pointer
-    /// from [`RABufferAnchor.try_register_new_operation()`] is because you
+    /// from [`EABufferAnchor.try_register_new_operation()`] is because you
     /// might need it to create the `OperationInteraction` instance.
     pub fn get_buffer_ptr_and_len(&self) -> (*mut V, usize) {
         self.anchor.buffer
@@ -898,9 +898,9 @@ where
     /// Returns true if there is a "pending" operation.
     ///
     /// This operation might already have been completed but
-    /// [`RABufferAnchor.cleanup_operation()`] wasn't called yet
-    /// (which also means that we did neither await [`RABufferAnchor.completion()`] nor
-    /// [`RABufferAnchor.cancellation()`])
+    /// [`EABufferAnchor.cleanup_operation()`] wasn't called yet
+    /// (which also means that we did neither await [`EABufferAnchor.completion()`] nor
+    /// [`EABufferAnchor.cancellation()`])
     pub fn has_pending_operation(&self) -> bool {
         self.operation_interaction().is_some()
     }
@@ -997,12 +997,12 @@ where
     }
 }
 
-/// Type wrapping a `RABufferHandle` which has a currently ongoing operation.
+/// Type wrapping a `EABufferHandle` which has a currently ongoing operation.
 pub struct OperationHandle<'a, V, OpInt>
 where
     OpInt: OperationInteraction,
 {
-    anchor: RABufferHandle<'a, V, OpInt>,
+    anchor: EABufferHandle<'a, V, OpInt>,
 }
 
 impl<'a, 'r, V, OpInt> OperationHandle<'a, V, OpInt>
@@ -1010,7 +1010,7 @@ where
     OpInt: OperationInteraction,
 {
 
-    /// See [`RABufferHandle.get_buffer_after_completion()`]
+    /// See [`EABufferHandle.get_buffer_after_completion()`]
     ///
     /// But needs a closure as we can't return a &mut [V] in a method consuming self.
     pub async fn get_buffer_after_completion<R>(mut self, buffer_access: impl FnOnce(&mut [V], OpInt::Result) -> R) -> R {
@@ -1018,28 +1018,28 @@ where
         buffer_access(buffer, res.unwrap())
     }
 
-    /// See [`RABufferHandle.completion()`].
+    /// See [`EABufferHandle.completion()`].
     pub async fn completion(mut self) -> OpInt::Result {
-        //SAFE[UNWRAP]: We unique borrow/own the RABufferHandle through this type
+        //SAFE[UNWRAP]: We unique borrow/own the EABufferHandle through this type
         //              and the type guarantees that there is an "ongoing" operation
         //              and we consume this type in this function call.
         self.anchor.completion().await.unwrap()
     }
 
-    /// See [`RABufferHandle.cancellation()`]
+    /// See [`EABufferHandle.cancellation()`]
     pub async fn cancellation(mut self) -> OpInt::Result {
-        //SAFE[UNWRAP]: We unique borrow/own the RABufferHandle through this type
+        //SAFE[UNWRAP]: We unique borrow/own the EABufferHandle through this type
         //              and the type guarantees that there is an "ongoing" operation
         //              and we consume this type in this function call.
         self.anchor.cancellation().await.unwrap()
     }
 
-    /// See [`RABufferHandle.request_cancellation()`]
+    /// See [`EABufferHandle.request_cancellation()`]
     pub async fn request_cancellation(&mut self) {
         self.anchor.request_cancellation().await;
     }
 
-    /// See [`RABufferHandle.operation_interaction()`]
+    /// See [`EABufferHandle.operation_interaction()`]
     pub fn operation_interaction(&self) -> Option<Pin<&OpInt>> {
         self.anchor.operation_interaction()
     }
@@ -1052,12 +1052,12 @@ macro_rules! ra_buffer {
         // SAFE:
         // 1. We can use the buffer as it's directly on the stack above the anchor
         // 2. We directly pin the anchor to the stack as it's required.
-        let mut $name = unsafe { $crate::RABufferAnchor::<_, $OpInt>::new_unchecked(&mut $name) };
+        let mut $name = unsafe { $crate::EABufferAnchor::<_, $OpInt>::new_unchecked(&mut $name) };
         // SAFE:
         // 1. Works like `pin_mut!` we shadow the same stack allocated buffer to prevent any non-pinned
         //    access to it.
         //FIXME: Update SAFE doc
-        let mut $name = unsafe { $crate::RABufferHandle::new_unchecked(&mut $name) };
+        let mut $name = unsafe { $crate::EABufferHandle::new_unchecked(&mut $name) };
     );
 }
 
@@ -1065,7 +1065,7 @@ macro_rules! ra_buffer {
 ///
 /// This can be useful if you have a DMA API which requires `'static` and uses buffer leaking
 /// for safety and you want (and can) to wrap it in a way which would work with a non-static
-/// [`RABufferHandle`] but you still need to pass in a `'static` buffer implementing the
+/// [`EABufferHandle`] but you still need to pass in a `'static` buffer implementing the
 /// `ReadBuffer` and `WriteBuffer` traits.
 #[cfg(feature = "embedded-dma")]
 pub struct UnsafeEmbeddedDmaBuffer<V> {
@@ -1111,7 +1111,7 @@ const _: () = {
         }
     }
 
-    impl<'a, V, OpInt> RABufferHandle<'a, V, OpInt>
+    impl<'a, V, OpInt> EABufferHandle<'a, V, OpInt>
     where
         V: Word,
         OpInt: OperationInteraction,
@@ -1128,7 +1128,7 @@ const _: () = {
         }
     }
 
-    unsafe impl<'a, V, OpInt> ReadBuffer for RABufferHandle<'a, V, OpInt>
+    unsafe impl<'a, V, OpInt> ReadBuffer for EABufferHandle<'a, V, OpInt>
     where
         V: Word,
         OpInt: OperationInteraction,
@@ -1140,7 +1140,7 @@ const _: () = {
         }
     }
 
-    unsafe impl<'a, V, OpInt> WriteBuffer for RABufferHandle<'a, V, OpInt>
+    unsafe impl<'a, V, OpInt> WriteBuffer for EABufferHandle<'a, V, OpInt>
     where
         V: Word,
         OpInt: OperationInteraction,
@@ -1227,20 +1227,20 @@ mod tests {
             mi.assert_op_ended_enforced();
         }
 
-        async fn call_and_leak_op<'a>(buffer: RABufferHandle<'a, u8, OpIntMock>) -> MockInfo {
+        async fn call_and_leak_op<'a>(buffer: EABufferHandle<'a, u8, OpIntMock>) -> MockInfo {
             let (op, mock_info) = mock_operation(buffer).await;
             mem::forget(op);
             mock_info
         }
 
         async fn call_op<'a>(
-            buffer: RABufferHandle<'a, u8, OpIntMock>,
+            buffer: EABufferHandle<'a, u8, OpIntMock>,
         ) -> (OperationHandle<'a, u8, OpIntMock>, MockInfo) {
             mock_operation(buffer).await
         }
     }
 
-    mod RABufferAnchor {
+    mod EABufferAnchor {
 
         mod try_register_new_operation {
             use super::super::super::*;
@@ -1330,8 +1330,8 @@ mod tests {
                 let buff_ptr = buffer as *mut _ as *mut u8;
                 let buff_len = buffer.len();
 
-                let mut anchor = unsafe { RABufferAnchor::<_, OpIntMock>::new_unchecked(buffer) };
-                let anchor = unsafe { RABufferHandle::new_unchecked(&mut anchor) };
+                let mut anchor = unsafe { EABufferAnchor::<_, OpIntMock>::new_unchecked(buffer) };
+                let anchor = unsafe { EABufferHandle::new_unchecked(&mut anchor) };
 
                 let (ptr, len) = anchor.get_buffer_ptr_and_len();
                 assert_eq!(len, buff_len);

@@ -1,7 +1,7 @@
 use std::{sync::atomic::AtomicUsize, any::TypeId, cell::UnsafeCell, pin::Pin};
 
 use futures_lite::future::block_on;
-use remote_accessed_buffer::{OperationHandle, OperationInteraction, RABufferHandle, UnsafeEmbeddedDmaBuffer, op_int_utils::atomic_state, ra_buffer};
+use external_accessed_buffer::{OperationHandle, OperationInteraction, EABufferHandle, UnsafeEmbeddedDmaBuffer, op_int_utils::atomic_state, ra_buffer};
 use fake_dma::{Singletons, create_singletons, Stream, Periphery, Transfer, S1, FooBarPeriphery};
 
 mod fake_dma;
@@ -42,7 +42,7 @@ fn use_case_emulation() {
 }
 
 pub async fn start_copy_data_to_buffer<'a, S,P>(
-    mut buffer: RABufferHandle<'a, u8, DMAAnchor<S, P>>,
+    mut buffer: EABufferHandle<'a, u8, DMAAnchor<S, P>>,
     stream: S,
     peri: P
 ) -> OperationHandle<'a, u8, DMAAnchor<S, P>>

@@ -78,7 +78,7 @@ pub unsafe fn replace_sync_awaiting_hook(new_hook: SynAwaitingHook) -> SynAwaiti
 ///
 /// ```
 /// # use core::{sync::atomic::spin_loop_hint, task::{Context, Poll}};
-/// # use remote_accessed_buffer::{op_int_utils::no_op_waker, hooks::*};
+/// # use external_accessed_buffer::{op_int_utils::no_op_waker, hooks::*};
 /// fn default_sync_await_hook((data, poll_fn): (OpaqueData, SyncAwaitingHookPollFn)) {
 ///     let waker = no_op_waker();
 ///     let mut ctx = Context::from_waker(&waker);
@@ -96,7 +96,7 @@ pub unsafe fn replace_sync_awaiting_hook(new_hook: SynAwaitingHook) -> SynAwaiti
 /// If the `std` feature is enabled following implementation is used instead:
 ///
 /// ```
-/// # use remote_accessed_buffer::{op_int_utils::no_op_waker, hooks::*};
+/// # use external_accessed_buffer::{op_int_utils::no_op_waker, hooks::*};
 /// #
 /// fn default_sync_awaiting_hook((data, poll): (OpaqueData, SyncAwaitingHookPollFn)) {
 ///     use futures_lite::future::{block_on, poll_fn};
