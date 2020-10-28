@@ -67,8 +67,11 @@ mod flag {
 #[derive(Debug)]
 pub struct Anchor<Result> {
     inner: InnerAnchor<Result>,
-    /// Marker to prevent `Sync`/`Send`
-    not_sync_send: PhantomData<*const ()>,
+    /// Marker to prevent `Sync`, the method on `Anchor` must not be called in parallel.
+    /// Because of neither `Anchor` nor `Completer` must be `Sync`, even through `InnerAnchor`
+    /// is `Sync` but it is guaranteed to only be accessed form at most two threads in parallel
+    /// (one from the non `Sync` anchor and one from the non `Sync` Completer).
+    not_sync_send: PhantomData<UnsafeCell<Result>>,
 }
 
 /// The `AtomicStateAnchor` impl.
@@ -106,10 +109,17 @@ struct InnerAnchor<Result> {
     result_slot: UnsafeCell<Option<Result>>,
 }
 
-/// SAFE: We do guard access with the sate_sync atomic, waker is Sync anyway.
-///       The way we use the cells doesn't allow multiple `&` borrows from different
-///       threads at the same time so `Result` only needs to be send.
-unsafe impl<Result> Sync for InnerAnchor<Result> where Result: Send {}
+/// # Safety
+///
+/// - We synchronize access to the unsafe cells through the `sate_sync` atomic.
+/// - We use the unsafe cells to send waker to the completer and send results back,
+///   because of this Waker and Result need to be `Send`, but not `Sync`.
+///
+unsafe impl<Result> Sync for InnerAnchor<Result>
+where
+    Result: Send,
+    Waker: Send,
+{}
 
 impl<Result> Anchor<Result> {
     /// Create a new anchor.
@@ -301,9 +311,22 @@ pub struct Completer<Result> {
     ptr: *const InnerAnchor<Result>,
 }
 
-/// SAFE: If the Result is `Send` InnerAnchor is `Sync` and we can `Send` the
-///       handle to another thread to then send the result back.
-unsafe impl<Result> Send for Completer<Result> where Result: Send {}
+/// # Safety
+///
+/// It's safe to implement `Send` if a `&InnerAnchor<Result>`-ref would be `Send`.
+/// (As the pointer acts like a `&`-ref with unknow lifetime, through which is
+/// guaranteed to last as long as the life of the `Completer` instance.)
+///
+/// Sadly we can't add a `for<'a> &'a InnerAnchor<Result>: Send` bound as `InnerAnchor`
+/// is not public.
+///
+/// But we know `&InnerAnchor<Result>` is `Send` if `InnerAnchor<Result>` is `Sync`,
+/// which it is if `Result` and `Waker` are `Send`.
+unsafe impl<Result> Send for Completer<Result>
+where
+    Result: Send,
+    Waker: Send,
+{}
 
 impl<Result> Completer<Result> {
     /// Marks the operation as completed and sends back the result.

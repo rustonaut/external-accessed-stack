@@ -192,8 +192,6 @@
 //! create the anchor and handle shadows the anchor making sure you can't directly
 //! access it and in turn you can't move it around).
 //!
-//! TODO Send/Sync
-//!
 //! Lastly this library uses some tricks to handle aliasing and external access
 //! to the [`OperationInteraction`] as described further below. (The [`StackValueHandle`]
 //! contains only a `&`-ref + interior mutability even through it behaves like a `&mut`-ref
@@ -616,8 +614,54 @@ where
     ///   MUST NOT exist anymore as then the instance is accessed through a `&mut`-ref which guarantees no
     ///   aliasing is happening. (And it's then dropped which would invalidate the ref.)
     ///
+    /// - Generally to access this unsafe cell as mut you need a unique reference to it. For example having
+    ///   a `&mut StackValueHandle` and knowing that there is no ongoing operation.
+    ///
     operation_interaction: UnsafeCell<Option<ManuallyDrop<OpInt>>>,
 }
+
+
+/// # Safety
+///
+/// This is safe to send if we can send both a `&mut V` and the `OperationInteraction`.
+///
+/// While this does contains a `*mut V` which as a pointer is not send to be on the safe side the
+/// pointer is not used in any way which would make it unsafe to send.
+///
+/// This also contains a `UnsafeCell` but this also doesn't affect if you can `Send `this.
+///
+/// *Warning:* You are supposed to stack pin the anchor so the only situation where it makes sense to send
+/// it is when it's pinned on a async stack frame and you send that stack frame (i.e. the generator returned
+/// by the future). Which is also why it needs to be send.
+///
+/// Note: That while it is safe to make this type `Sync` as far as I can tell it makes no sense as you are
+/// supposed to only have access to it through the [`StackValueHandle`] which roughly emulates a `&mut` borrow
+/// and as such there can only be one active borrow of that kind at a time making `Sync` pointless.
+unsafe impl<'a, V, OpInt> Send for StackAnchor<'a, V, OpInt>
+where
+    V: ?Sized,
+    for<'x> &'x mut V: Send,
+    OpInt: OperationInteraction + Send
+{}
+
+
+/// # Safety
+///
+/// While this type does contain a unsafe cell its only allowed to be used if you have a known to be unique
+/// reference to the anchor (a `&mut` which implies unique access to anchor, e.g. a `&mut StackValueHandle`)
+/// **and** there is no ongoing operation.
+///
+/// The only reason we need to use interior mutability is because we can't have a `&mut anchor` without `noaliase`
+/// constraints being implied on all fields of the anchor, which would be a problem wrt. sharing state with the
+/// operation through the [`OperationInteraction`].
+unsafe impl<'a, V, OpInt> Sync for StackAnchor<'a, V, OpInt>
+where
+    V: ?Sized,
+    for<'x> &'x mut V: Sync,
+    OpInt: OperationInteraction + Sync
+{}
+
+
 
 impl<'a, V, OpInt> StackAnchor<'a, V, OpInt>
 where
@@ -702,6 +746,31 @@ where
     anchor: Pin<&'a StackAnchor<'a, V, OpInt>>,
 }
 
+/// # Safety
+///
+/// [`StackValueHandle`] is `Send` even through the anchor is not `Sync` as [`StackValueHandle`] acts like
+/// a `&mut` even through it uses a `&`-ref (to work around aliasing problem).
+///
+/// This also means that while this handle will potentially use the interior mutability, but only through
+/// `&mut` borrows to the handle. Similar while the handle does support reborrowing it only supports `&mut`
+/// based reborrowing and is neither `Clone` nor `Copy`.
+unsafe impl<'a,V,OpInt> Send for StackValueHandle<'a, V, OpInt>
+where
+    V: ?Sized,
+    &'a mut StackAnchor<'a, V,OpInt>: Send,
+    OpInt: OperationInteraction,
+{}
+
+/// # Safety
+///
+/// See the Send doc. If a `&mut` reference to the anchor would be `Sync` this is sync.
+unsafe impl<'a,V,OpInt> Sync for StackValueHandle<'a, V, OpInt>
+where
+    V: ?Sized,
+    &'a mut StackAnchor<'a, V,OpInt>: Sync,
+    OpInt: OperationInteraction,
+{}
+
 impl<'a, V, OpInt> StackValueHandle<'a, V, OpInt>
 where
     V: ?Sized,
@@ -711,10 +780,16 @@ where
     ///
     /// # Safety
     ///
-    /// This calls [`Pin::new_unchecked()`] and inherites the unsafe contract from it.
+    /// This calls [`Pin::new_unchecked()`] and inherited the unsafe contract from it.
     ///
     /// Furthermore this must be used correctly as described in the unsafe-contract from
     /// [`StackAnchor::new_unchecked()`].
+    ///
+    /// Lastly even through this internally uses a `&`-ref it acts as a `&mut`-ref, this
+    /// means that the [`StackValueHandle`] instance must be the only way to access the anchor
+    /// there must be no other `&`-refs or `&mut`-refs to the [`StackAnchor`]. (Through if there
+    /// is a ongoing operation there might be references *into* the [`StackAnchor`] to or into it's
+    /// [`OperationInteraction`] instance).
     ///
     /// Similar to `pin_utils::pin_mut!` it's fully safe if this is directly used after
     /// creating a [`StackAnchor`] (correctly) on the stack and we shadow the variable the anchor
