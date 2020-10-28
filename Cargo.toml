@@ -1,6 +1,6 @@
 [package]
-name = "external-accessed-buffer"
-version = "0.1.0"
+name = "external-accessed-stack"
+version = "0.2.0"
 authors = ["Philipp Korber <philipp@korber.dev>"]
 edition = "2018"
 

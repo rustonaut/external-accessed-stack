@@ -3,12 +3,12 @@
 //! It mainly contains two types:
 //!
 //! 1. [`Anchor`] which should be wrapped by an [`OperationInteraction`] implementation and which
-//!    does itself implement [`OperationInteraction`]. This type is moved into the `EABufferAnchor`
+//!    does itself implement [`OperationInteraction`]. This type is moved into the `StackAnchor`
 //!    when registering a new operation. It's the pinned anchor we can point to.
 //!
 //! 2. [`Completer`] which is a handle which can be used to mark a operation as completed and send
 //!    back the result. This one can be created from the `Anchor` after it's pinned inside the
-//!    `EABufferAnchor`. In this implementation `Completer` is not `Sync` (but `Send`) so only
+//!    `StackAnchor`. In this implementation `Completer` is not `Sync` (but `Send`) so only
 //!    one thread (or similar) can complete the operation.
 //!
 use crate::{hooks::get_sync_awaiting_hook, utils::not, OperationInteraction};
@@ -131,7 +131,7 @@ impl<Result> Anchor<Result> {
     /// `Pin` guarantees enforce that once the anchor is pinned
     /// it must no longer be moved until dropped. Which means you
     /// MUST create the completer *after* moving the anchor into
-    /// the underlying `EABufferAnchor`. Everything else would require
+    /// the underlying `StackAnchor`. Everything else would require
     /// a unsafe-contract violation (of e.g. [`Pin`] or [`Completer.complete_operation`]).
     ///
     /// # Panic
@@ -322,7 +322,7 @@ impl<Result> Completer<Result> {
     ///   a pointer be dereferenced anymore. Be aware that literally a existing `&`,`&mut`
     ///   is already a violation of this contract even if it is not used!
     /// - The anchor has not been dropped. If the completer was created through a `Anchor`
-    ///   pinned into a `EABufferAnchor` this is already enforced.
+    ///   pinned into a `StackAnchor` this is already enforced.
     /// - This is only called once (which is implicitly enforced by consuming self).
     ///
     pub unsafe fn complete_operation(self, result: Result) {

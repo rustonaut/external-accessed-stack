@@ -1,21 +1,19 @@
-//! This library provides a way to have a *stack allocated* buffer which can be
-//! use by completion based I/O like DMA, io-uring.
+//! This ways provides a way to allow access to a (async) stack allocated value outside
+//! of the given async task and/or thread.
 //!
-//! To make it possible to safely use a stack allocated buffer with completion
-//! base I/O some UX drawbacks are necessary compared to the classical approach
-//! of "temporary leak the heap allocated buffer until the operation completes".
+//! The main use of this library is to provide a way to have a stack allocated*
+//! buffer which can be used by completion base I/O like DMA.
+//!
+//! In many cases it's much easier with a much better API UX to not share stack
+//! allocated values but instead use heap allocated values and move them to
+//! whatever wants to access them.
 //!
 //! This library is focused on the async/await use-case of such a buffer,
 //! a similar library like this could be written for blocking use cases.
 //!
-//! This library is `#[no_std]` compatible, it doesn't need alloc.
-//!
-//! While completion based (or other "external" I/O) operations can be
-//! done with this buffer for each API it's meant to be used with some
-//! glue code is necessary. The main idea is that safe abstractions around
-//! such API's might support this buffer from out of the box maybe even
-//! use it as a fundamental component. But if not it normally can be
-//! adapted to work with such APIs.
+//! This library is `#[no_std]` compatible, it doesn't need alloc for any
+//! functionality. But if you use it in a std context enabling the `std`
+//! feature can lead to slightly better performance in some (edge) cases.
 //!
 //! # Example
 //!
@@ -23,12 +21,12 @@
 //!
 //! # Usage-Recommendation
 //!
-//! - You can pass around a `&mut EABufferHandle` which is in many situations the easiest thing
-//!   to do. Alternatively you can treat it similar to a `&mut Buffer` reference, but as there
-//!   are no automatic re-borrows for custom types you will need to use the [`EABufferHandle.reborrow()`]
+//! - You can pass around a `&mut StackValueHandle` which is in many situations the easiest thing
+//!   to do. Alternatively you can treat it similar to a `&mut Value` reference, but as there
+//!   are no automatic re-borrows for custom types you will need to use the [`StackValueHandle.reborrow()`]
 //!   method. The benefit of the later is that it's easier to write methods for it as you only have a
-//!   single covariant lifetime in the [`EABufferHandle`] instead of having a covariant lifetime
-//!   in the `&mut` and a invariant lifetime in the [`EABufferHandle`]
+//!   single covariant lifetime in the [`StackValueHandle`] instead of having a covariant lifetime
+//!   in the `&mut` and a invariant lifetime in the [`StackValueHandle`]
 //!
 //! - Given that there is currently no async destructor it is recommended
 //!   to do a `buffer.completion().await` (or `cancellation()`) at the
@@ -37,185 +35,200 @@
 //!   prevent any unnecessary blocking during drop in the case where
 //!   there is still a ongoing operation.
 //!
-//! # Principle (short/TL;DR)
+//! # How it works
 //!
-//! The [`EABufferHandle`] pins the [`EABufferAnchor`] to the stack.
+//! The anchor is used to "anchor" the value to the stack. While a simple
+//! implementation would contains the value itself, this one doesn't do
+//! that to be able to support coercion to unsized values e.g. a `[u8]`
+//! buffer. Drawback of this is that the anchor has a `unsafe` constructor.
+//! But if you use the macro to create it you won't need to bother with
+//! this detail.
 //!
-//! Due to the way `Pin` works and the unsafe contract of the buffer
-//! constructor we can be assured that `Drop` of the anchor is called
-//! before the memory of the buffer is potentially re-purposed (including
-//! freeing it).
+//! The idea of the [`StackAnchor`] is that on [`StackAnchor.drop()`] it will
+//! *wait* for the completion of the external operation only returning from drop
+//! the stack is no longer externally accessed (this includes return by panic).
+//! (More details further below.)
 //!
-//! We provide ways to properly await the completion of a operation.
+//! Semantically it will `Send` a `&mut` ref of the value to whatever executes
+//! the operation and then when that thing signals the [`OperationInteraction`]
+//! instance that the operation it completed the `&mut` is send back/discarded.
+//! (Note that signaling the completion is inherently unsafe as it must guarantee
+//! that there are no more references to the stack value, but how exactly it is
+//! done is a implementation detail of the [`OperationInteraction`] instance.)
 //!
-//! We always implicitly await the completion of an operation before
-//! (semantically) reclaiming the ownership of the stack buffer.
+//! To make sure the anchor containing the stack value is not moved/discarded
+//! the [`StackAnchor`] is pinned to the stack using the [`StackValueHandle`]
+//! which also makes handling lifetimes a bit easier then a raw `Pin` and works
+//! around some rust limitations wrt. self-referencing and mutability.
+//! (The externally accessed stack value does not need to be pinned.)
 //!
-//! For example [`EABufferHandle.buffer_mut()`] hands out a `&mut [V]`
-//! to the underlying buffer but first will await that any ongoing
-//! operation completed.
+//! Pin gives following [drop guarantee](https://doc.rust-lang.org/std/pin/index.html#drop-guarantee):
 //!
-//! Once `Drop` is called we make sure to block until any ongoing operation
-//! ended to assure that an external operation never accesses the then
-//! potentially re-purposed (or just freed) memory.
+//! > its memory will not get invalidated or repurposed from the moment it gets pinned until when drop is called.
 //!
-//! # Principle (full)
+//!
+//! Given the `unsafe` contract of the [`StackAnchor`] which is normally fulfilled by
+//! placing the value just above the anchor on the (async) stack we have the guarantee
+//! that either [`StackAnchor.drop()`] is called or the stack is leaked but never ever
+//! will the memory of the stack be repurposed without calling drop on the anchor.
+//! In turn [`StackAnchor.drop()`] only returns once the external stack access ended.
+//!
+//! A normal stack can not be leaked so drop will always be called as long as the thread
+//! doesn't hang or the process aborts. On the other hand "async" stack can leak as due
+//! to the async transformation values might be in the generator instead of the stack.
+//! But generates only can contain a [`StackAnchor`] if they started to run in which
+//! case they are pinned in which case the drop guarantee still applies to the anchor.
+//! (You can leak boxed generators, but you can't leak stack pinned generators without
+//! unsound unsafe code.)
+//!
+//! As already mentions [`StackAnchor.drop()`] will not return until the external operation
+//! completes. For this we provide a way to properly await completion. Both in a sync way
+//! for `drop` and a async way for methods like [`StackValueHandle.completion()`].
+//!
+//! One **major** drawback of this approach is that if the external operation hangs the
+//! future might not only hang in a async way (e.g. on `operation.completion().await`) but
+//! also on a sync way during drop if no method like `completion()` is awaited. **This
+//! includes situations where a future is dropped to "cancel" it!**.
+//!
+//! The [`StackAnchor`] is generic over the way how it polls for completion by storing
+//! a instance of [`OperationInteraction`] **in** the [`StackAnchor`] referred to by the
+//! [`StackValueHandle`].
+//!
+//! This allows all kinds of custom schemas for polling for completion, furthermore uses
+//! some trick to *soundly* allow giving out pointers to the [`OperationInteraction`]
+//! instance stored in the [`StackAnchor`] (which are valid until the operation ended).
+//! This means that no `alloca` based types like `Arc` are needed to store the state
+//! of the completion of the operation. I.e. the [`OperationInteraction`] instance
+//! itself is externally accessible (but is limited to `Sized` types).
+//!
+//! One possible way to implement [`OperationInteraction`] in a lock-free way is
+//! provided in the `op_int_utils::atomic_state` module. Operations API's using
+//! this library can very often either use it directly or wrap it in their own impl.
+//!
+//!
+//! # More details about how it works
 //!
 //! ## Terminology
 //!
-//! - *stack frame*: A bit of memory allocated with a function call and
-//!   freed with the end of the function call. Rust guarantees that all
-//!   values stored on the stack are dropped before the stack is freed.
-//!   There are no exceptions, but some contains might prevent their inner
-//!   values from being dropped like e.g. `ManuallyDrop` or a custom `LeakyBox`
-//!   type which acts like a box which leaks it's value on `Drop`. You can't
-//!   really leak the normal stack.
+//! ### *external accessed stack value*
 //!
-//! - *stack frame*: A stack frame in a "normal" function which used
-//!   the "normal" stack allocation/free mechanism.
+//! A value on the stack which in case of an async stack is accessed from
+//! outside the task (future) or in case of a sync stack is accessed from
+//! outside of the thread.
 //!
-//! - *async stack frame*: A stack frame a `async` function, due to the transformation
-//!   done by async this isn't necessary mapping to a "normal" stack frame instead all
-//!   stack allocated values which live across a (potential) `.await` call will be
-//!   allocated inside of the pinned future which `async` turned the function into.
-//!   This future might lay on the "normal" stack, the heap (`Pin<Box<...>>`) or it
-//!   might be inside another future which awaited this future directly. In difference
-//!   to the normal stack frame a *async stack frame* can be leaked, but only if it
-//!   is on the heap (see below). Besides that the guarantees are roughly the same.
-//!   I.e. all values are guaranteed to get dropped before the stack if freed, this
-//!   is possible as dropping the future will drop all values currently inside of the
-//!   pinned future.
+//! The access might be by a different task/thread or something else like
+//! the OS kernel or a DMA controller.
 //!
-//! ## Relevant workings of Pin and async/await
+//! ### *(external) operation*
 //!
-//! The main guarantee `Pin<&mut T>` gives you is that `T` is "pinned" in memory,
-//! i.e. it will not be moved around. While this is important for our use-case
-//! we also heavily rely on the "drop guarantee" `Pin` gives us. To quote:
+//! This libraries uses the term operation mainly to refers
+//! to external operations done on the stack value of the [`StackAnchor`].
+//! What that means is that something which is not the current async task
+//! or thread (in a sync context) is *potentially* "somehow" accessing the
+//! value which could or could not be ina way which mutates the value. For
+//! example a DMA controller reading/writing from/to an stack allocated
+//! buffer would be an ongoing operation.
 //!
-//! > for pinned data you have to maintain the invariant that its memory will not
-//! > get *invalidated* or *repurposed* from the moment it gets pinned until when drop
-//! > is called. Only once drop returns or panics, the memory may be reused.
+//! ### *stack*/*stack frame*
 //!
-//! The means that you can not free the memory a value was pinned to without
-//! dropping the value. Neither can you *repurpose* the memory.
+//! A bit of memory allocated with a function call and
+//! freed with the end of the function call. Rust guarantees that all
+//! values stored on the stack are dropped before the stack is freed.
+//! There are no exceptions, but some contains might prevent their inner
+//! values from being dropped like e.g. `ManuallyDrop` or a `Rc` with
+//! a reference cycle.
 //!
-//! This mean that if you pin a value to a stack frame (weather async or not) you
-//! must either not leak the value or leak the whole stack frame (which isn't possible
-//! for normal stacks frames, but is possible for values pinned to a async stack frame
-//! where the async transformation moves them into the future and the future is pinned
-//! on the heap e.g. with `Pin<Box<...>>`).
+//! ### *async stack*/*async stack frame*
 //!
-//! It is important that while that is a unsafe-contract which needs to be uphold by the
-//! user of `Pin` futures are made so that the contract will be uphold. Or else we would
-//! not be able to use them at all.
+//! The stack frame of an `async` function.
+//! Due to the async transformation the stack of an async function doesn't
+//! exactly behave like a "normal" stack mainly:
 //!
-//! ## How this library is safe.
+//! - Values which will not life across a `.await` will be placed on the normal stack.
+//! - Values which will life across a `.await` boundary will instead be placed in the
+//!   pinned generator of the given async function.
 //!
-//! This library requires a anchor to be pinned onto a (potentially async) stack frame.
-//! Furthermore the buffer the anchors anchors must uphold certain guarantees (see below),
-//! which are most easily fulfilled by placing the buffer directly onto the stack above
-//! the anchor.
+//! Still due to values only being placed in the generator when it pinned and the
+//! generate drop guarantees this behaves like a sync stack wrt. running the
+//! async function and awaiting other async functions in it.
 //!
-//! Furthermore it requires the anchor to only be accessible through the [`EABufferHandle`]
-//! which wraps the `Pin`. (This is best done the same way `pin_utils::pin_mut!` works.)
+//! The only practical difference is that while a normal stack frame can't really
+//! be leaked (without permanent hanging a thread) a async stack frame can be leaked
+//! if and only if the generator is allocated in `'static` memory (the heap or
+//! a `static mut` or a `static` with interior mutability).
 //!
-//! With that we can guarantee that either both the anchor and buffer leak together which
-//! means the buffer will not be repurposed or the anchors destructor is run before there
-//! is any chance of the buffer being repurposed.
+//! This means that we still can rely on the memory not being invalidated or re-purposed
+//! (without unsound unsafe code). Which means even through a future can be leaked it
+//! can only be leaked in a way safe for our purpose. (As we only rely on the memory not
+//! being invalidated or re-purposed).
 //!
-//! By blocking in the destructor until any operation on the buffer completes we can prevent
-//! the buffers memory from being re-purposed without the operation concluding. Which in turn
-//! can make it safe to use the buffer with completion based I/O like e.g. DMA.
+//! This also means futures which are pinned to the stack can not be leaked! Functions
+//! like `block_on` without `Send` bound normally pin and poll the future on the
+//! stack.
 //!
-//! To explain this better lets look at following code as if produced by the
-//! `ra_buffer!(buffer = [0u8; 32] of DMAInteraction)` code:
+//! ## How this library is safe?
 //!
-//! ```no_run
-//! # use core::{pin::Pin, task::{Context, Poll}};
-//! # use external_accessed_buffer::*;
-//! # struct DMAInteraction;
-//! # unsafe impl OperationInteraction for DMAInteraction {
-//! #   type Result = ();
-//! #   fn make_sure_operation_ended(self: Pin<&Self>) { todo!() }
-//! #   fn poll_request_cancellation(self: Pin<&Self>, cx: &mut Context) -> Poll<()> { todo!() }
-//! #   fn poll_completion(self: Pin<&Self>, cx: &mut Context) -> Poll<()> { todo!() }
-//! # }
-//! let mut buffer = [0u8; 32];
-//! // SAFE:
-//! // 1. We can use the buffer as it's directly on the stack above the anchor
-//! // 2. We directly pin the anchor to the stack as it's required.
-//! let mut buffer = unsafe { EABufferAnchor::<_, DMAInteraction>::new_unchecked(&mut buffer) };
-//! // SAFE:
-//! // 1. Works like `pin_mut!` we shadow the same stack allocated buffer to prevent any non-pinned
-//! //    access to it. (The pin is is wrapped in the `EABufferHandle`.)
-//! let mut buffer = unsafe { EABufferHandle::new_unchecked(&mut buffer) };
-//! ```
+//! This library is safe as long as we can make sure that the stack value:
 //!
-//! Here by having the array buffer on the same stack as the anchor and making the buffer
-//! out-life the anchor (it's on the stack "above" the buffer) we know that either we will
-//! leak both the buffer and the anchor (which is ok) or the anchor will be dropped be the
-//! buffer can maybe be accessed again (in the example case it can not as we shadow
-//! the buffer, too).
+//! 1. Is valid during the whole time it's used "externally".
+//! 3. Can not get any kind of reference to the value of which a
+//!    `&mut` ref is send to be externally accessed during the time
+//!    it is potentially externally accessed (i.e. until the operation
+//!    ends).
+//! 2. Handles `Sync`/`Send` and aliasing correctly.
 //!
-//! Semantically seen the anchor takes ownership of the buffer until it's dropped.
+//! By making sure that the memory of the value is only invalidated or
+//! re-purposed if the anchor was dropped and by making sure the anchors
+//! `drop()` method only returns once the external operation ended we can
+//! make sure it's valid fro the whole time it's used.
 //!
-//! Furthermore by shadowing the anchor with it's pin we make sure it's impossible to
-//! access the anchor through anything but the `Pin`. If we would not have shadowed it
-//! we would need to manually guarantee that it's not accessed which is just really annoying
-//! to do and error prone. Note that this aspects works exactly the same as `pin_mut!`.
-//! I literally could have replaced the last line with `pin_mut!(buffer)` having one
-//! unsafe line less in my code (but instead in `pin_mut!`). But for demonstration
-//! purpose and readability writing it out by hand is better, here.
+//! By checking for an ongoing operation before handing out any reference
+//! we can make sure we don't locally access it while having handed out
+//! a `&mut` externally.
 //!
-//! Now one think which should be mentioned is that needing to wait for completion in
-//! `Drop::drop` is not the best thing to do. We can not get around it but having something
-//! like a `AsyncDropPreparation` trait which automatically does something like a async
-//! drop before the drop would be supper helpful (a `AsyncDrop` which replaces `Drop` can't
-//! really work as far as I know).
+//! Through the unsafe contracts of [`StackAnchor.new_unchecked()`] and
+//! [`StackValueHandle.new_unchecked()`] make sure that you can't move the
+//! anchor to a different (async) stack then the value (the macro so safely
+//! create the anchor and handle shadows the anchor making sure you can't directly
+//! access it and in turn you can't move it around).
 //!
-//! Because of this it's strongly recommended to make sure that under normal circumstances
-//! `buffer.completion().await` or `buffer.cancellation().await` is run before dropping it.
+//! TODO Send/Sync
 //!
-//! ## Why `EABufferHandle` instead of a `Pin`.
+//! Lastly this library uses some tricks to handle aliasing and external access
+//! to the [`OperationInteraction`] as described further below. (The [`StackValueHandle`]
+//! contains only a `&`-ref + interior mutability even through it behaves like a `&mut`-ref
+//! this is necessary to prevent accidental no-aliasing guarantees to the [`OperationInteraction`]
+//! while it's potentially aliased, this is currently necessary due to a limitation of rust).
+//!
+//! ## Why `StackValueHandle` instead of a `Pin`.
 //!
 //! There are two reasons for it:
 //!
 //! - Usability(1): We can implement the necessary methods on the handle, which means we
 //!   can have methods based on `&mut self` and `&self` taking advantage of the borrow
-//!   checker _and_ providing better UX. (You still can directly reborrow the handle using
-//!   [`EABufferHandle.reborrow()`] in the same way you could reborrow a `Pin` using
+//!   checker *and* providing better UX. (You still can directly reborrow the handle using
+//!   [`StackValueHandle.reborrow()`] in the same way you could reborrow a `Pin` using
 //!   [`Pin.as_mut()`]).
 //!
 //! - Usability(2): Instead of having two lifetimes which need to be handled correctly we
-//!   only have one.I.e. `Pin<&'covar mut EABufferAnchor<'invar, V, OpInt>>` vs.
-//!   `EABufferHandle<'covar, V, OpInt>`.
+//!   only have one.I.e. `Pin<&'covar mut StackAnchor<'invar, V, OpInt>>` vs.
+//!   `StackValueHandle<'covar, V, OpInt>`. (which is safe as the handle roughly represents a
+//!   `&mut`-ref to the underlying buffer with additional functionality attached to it).
 //!
 //! - Rust limitations as mentioned in [Issue #63818](https://github.com/rust-lang/rust/issues/63818).
-//!   This forces us the use a `Pin<&EABufferAnchor<..>>` and interiour mutability instead of
-//!   an `Pin<&mut EABufferAnchor>` but the handle should behave like a `&mut Buffer` wrt. the
+//!   This forces us the use a `Pin<&StackAnchor<..>>` and interior mutability instead of
+//!   an `Pin<&mut StackAnchor>` but the handle should behave like a `&mut Buffer` wrt. the
 //!   lifetime variance/re-borrowing. I.e. there should only be one (not borrowed) `&mut` to
 //!   the handle at any point in time (for better ease of use, not safety).
 //!   As such we wrapped pinned reference in a custom handle type.
 //!
 //! ## How is it safe to drop the `OperationHandle`?
 //!
-//! If a operation started a `OperationInteraction` instance is registered on the buffer.
-//! This instance can be used to check if the operation ended.
+//! The [`OperationHandle`] is just a wrapper around a [`StackValueHandle`] which knowns
+//! that there is a ongoing operation and can as such provide nicer API's for e.g. `.completion().await`.
 //!
-//! This instance is *not* placed in the `OperationHandle` returned. Instead it is placed
-//! "upstream" in the pinned anchor. This mean we can guarantee to have access to it until
-//! we explicitly remove it because we realized the operation ended.
-//!
-//! The `OperationHandle` just wraps the used `EABufferHandle` to have a
-//! way to encode that fact that there is a ongoing operation in the type system.
-//!
-//! You can always drop the `OperationHandle` handle which will literally have no affect
-//! on the operation itself.
-//!
-//! The reason for this is that we anyway can access the `EABufferHandle`
-//! while a operation is ongoing by using re-borrows + (safe) leaking. In the end awaiting
-//! completion/cancellation on the `OperationHandle` just forwards it the the same named
-//! methods on `EABufferHandle`!
+//! This means it's de-facto just like a reborrow of an `&mut` which always has no (runtime)
+//! effect on being dropped. So this is always safe.
 //!
 //! ## How do we make sure that an operation can't override another?
 //!
@@ -226,46 +239,45 @@
 //! of any ongoing operation first before starting a new one. Doing so while there is
 //! no ongoing operation is basically `Noop` (as single `option.is_some()` call).
 //!
-//! ## How can we access the buffer safely outside of operations?
+//! ## How can we access the value safely outside of operations?
 //!
-//! There are two methods [`EABufferHandle.buffer_mut()`] and [`EABufferAnchor.buffer_ref()`]
-//! which return a `&mut [V]`/`&[V]` after awaiting completion of any still ongoing
-//! operation.
+//! There are methods to access the buffer once the operation ended (e.g. [`StackValueHandle.access_value_after_completion()`])
+//! and methods to access the buffer failing if there is a ongoing operation (e.g. [`StackValueHandle.try_access_value())`]).
 //!
-//! ## Guarantees for the passed in buffer
+//! ## Guarantees for the value passed to `StackAnchor.new_unchecked()`
 //!
 //! Before we slightly glossed over the guarantees a buffer passed in to
-//! [`EABufferAnchor.new_unchecked()`] must give, *because it's strongly
+//! [`StackAnchor.new_unchecked()`] must give, *because it's strongly
 //! recommended to always place it direct above the anchor on the same
 //! stack*.
 //!
 //! The unsafe-contract rule is:
 //!
-//! - You can pass any buffer in where you guarantee that it only can be re-purposed
-//!   after the anchor is dropped and that if the anchor is leaked the buffer is
+//! - You can pass any value in where you guarantee that it only can be re-purposed
+//!   after the anchor is dropped and that if the anchor is leaked the value is
 //!   guaranteed to be leaked, too.
 //!
 //! But this can be tricky to get right for anything but the most simple use
-//! case where you place the buffer directly on the stack above the anchor which
+//! case where you place the value directly on the stack above the anchor which
 //! then is directly pinned there.
 //!
 //! For more complex use case consider following rules:
 //!
-//! - You don't need to place the buffer directly on the stack, placing
-//!   a owner of it is enough for this. This can be e.g. a `Box<[V]>`,
-//!   `Vec<V>` or even a `MutexGuard<[V]>` it's only important that it owns
-//!   the buffer. We do not give out any drop guarantees for the buffer anyway,
-//!   as we semantically "send" the buffer to the operation and receive it back
-//!   once it's completed.
+//! - You don't need to place the value directly on the stack, placing
+//!   a unique owner of it is enough for this. This can be e.g. a `Box<[V]>`,
+//!   `Vec<V>` or even a `MutexGuard<[V]>` it's only important that it unique owns
+//!   the value. We do not give out any drop guarantees for the value anyway,
+//!   as we semantically "send" a `&mut`-ref to the value to the operation and
+//!   receive it back/discard it once it's completed.
 //!
-//! - The buffer owner isn't required to be placed on the same stack frame. But it
+//! - The value owner isn't required to be placed on the same stack frame. But it
 //!   must be placed on the same or a parent stack frame and in the same or a parent
 //!   future. If and only if the future is pinned onto a normal stack, then the "same or
 //!   parent stack frame" rule extends from inside the async stack to the outside as the
 //!   async stack (or at leas the relevant parts) are part of the "normal" stack
 //!   on the outside they are placed on.
 //!
-//! This means you could have something crazy like:
+//! This means you *could* have something crazy like:
 //!
 //! ```ignore
 //! // sync stack frame
@@ -277,9 +289,9 @@
 //!     // 1. We do guarantee buffer to be on the same stack frame
 //!     //    (due to how we pin the future to the outside stack on which also the buffer is).
 //!     // 2. We shadow and pin it afterwards
-//!     let mut buffer = unsafe { EABufferAnchor::<_, DMAInteraction>::new_unchecked(&mut buffer); };
+//!     let mut buffer = unsafe { StackAnchor::<_, DMAInteraction>::new_unchecked(&mut buffer); };
 //!     // Safe: For the same reasons `pin_utils::pin_mut!` is safe.
-//!     let mut buffer = unsafe { EABufferHandle::new_unchecked(&mut buffer) };
+//!     let mut buffer = unsafe { StackValueHandle::new_unchecked(&mut buffer) };
 //!     do_some_dma_magic(buffer.reborrow()).await;
 //!     // make sure we properly await any pending operation aboves method might not have
 //!     // awaited the completion on, so that we don't block on drop (through that kinda doesn't
@@ -290,68 +302,55 @@
 //! let result = block_on_pin(future);
 //! ```
 //!
-//! While aboves example is sound, *it's strongly recommended to not do so*. As it's very
+//! While aboves example is sound, **it's strongly recommended to not do so**. As it's very
 //! prone to introducing unsafe-contract breaches. E.g. just changing the last two lines to
-//! `smol::block_on(future)` would brake the unsafe-contract as it no longer guarantees that
-//! the buffer is on the same or an parent stack of the anchor.
+//! a `block_on(future)` which doesn't stack pin the future would brake the unsafe-contract
+//! as it no longer guarantees that the value is on the same or an parent stack of the anchor.
 //!
 //!
-//! ## Implementing Operations with this buffer
+//! ## Implementing API's to start operations on the stack value
 //!
-//! This section contains some information for API implementers which do want to use this buffer.
+//! This section contains some information for API implementers which do want to use this library.
 //!
-//! - The [`EABufferHandle.try_register_new_operation()`] method can be used to register a new operation.
+//! - The [`StackValueHandle.try_register_new_operation()`] method can be used to register a new operation.
 //!
-//! - As it will fail if there is still a ongoing operation ist recommended that the method calling register
-//!   does a `buffer.cancellation().await`.  Or in some special cases a `buffer..completion().await`.
-//!   But generally starting a new operation should cancel ongoing operations which have
-//!   not yet been completed if possible. Only the [`EABufferHandle.buffer_mut()`]
-//!   method does implicitly awaiting of completion instead of cancellation as this is much better wrt.
-//!   usability.
+//! - A operation must only start *after* [`StackValueHandle.try_register_new_operation()`] returned successfully.
 //!
-//! - A operation must only start *after* [`EABufferHandle.try_register_new_operation()`] returned successfully.
+//! - Semantically a `&mut V` reference to the value is passed to whatever executes the operation. Furthermore
+//!   the `&mut`-ref (and any reference based on it) is guaranteed to be discarded when the operation is completed.
+//!   Be aware that `&mut V` is `Send` if `V` is `Send`. Which means the value must be `Send` but doesn't need to
+//!   be `Sync`.
 //!
-//! - Semantically the ownership of the buffer is passed to whatever executes the operation until it completes.
-//!   This is also why the anchor stores a pointer instead of a reference to the buffer. It's best to think
-//!   completion based background operations done by a DMA-controller or the OS kernel as if they are done
-//!   by a different thread over which you have no control over. At least wrt. `Sync`/`Send` requirements.
-//!
-//! - To make it easier to build operations the [`EABufferHandle.get_buffer_ptr_and_len()`] method
+//! - To make it easier to build operations the [`StackValueHandle.get_ptr()`] method
 //!   can be called *before* starting a new operation. **But the returned ptr MUST NOT be dereferenced before
 //!   the operation starts.**. Even if you just created a reference but don't use it it's already a violation
 //!   of the unsafe contract (this is necessary due to how compliers treat references wrt. optimizations).
 //!
 //! - The `OperationInteraction` instance is a arbitrary `Sized` type which implements `OperationInteraction`
-//!   and as such is used to poll/await/sync await completion of the operation and/or notify that the operation
-//!   should be canceled.
+//!   and as such is used to poll-await/sync-await completion of the operation and/or notify that the operation
+//!   should be canceled (if supported by the operation, else requesting cancellation is a no-op).
 //!
 //! - The passed in [`OperationInteraction`] instance is semantically pinned, this means it will not be moved
 //!   until it's dropped. Furthermore it is guaranteed that [`OperationInteraction.make_sure_operation_ended()`]
-//!   is called before dropping it. By combining this knowledge with interior mutability it's possible to pass
-//!   pointers *into* the [`OperationInteraction`] instance to whatever does execute the operation. This is safe as
-//!   similar to the buffer the [`OperationInteraction`] instance won't be dropped before the operation completes.
+//!   is called before dropping it. Lastly it's guaranteed that there is no no-aliase constraint on the instance.
+//!   **This means you can pass a `&`-ref  like reference (i.e.`*const` ptr) to the  [`OperationInteraction`]
+//!   instance into whatever executes the operation as long as you make sure no `&`-ref exists after the operation
+//!   completed. This works in the same way the `&mut V` ref is passed to whatever does the operations. Combining
+//!   this with `Sync`/thread-safe interior mutability allows you to store state of the operation in the anchor.
+//!   An example for this is the [`crate::op_int_utils::atomic_state::Anchor`]. This can be used to pass back
+//!   a result from the operations, notify completion and directly cleanup the operations and passing `Waker`
+//!   which needs waking to the executor of the operation (or e.g. an interrupt handle called once the operation
+//!   completes).
 //!
-//! - The [`EABufferAnchor.operation_interaction()`] method can be used to get a pinned borrow to the current
+//! - The [`StackAnchor.operation_interaction()`] method can be used to get a pinned borrow to the current
 //!   operation interaction. This is useful to setup/start the operation after having already registered it.
 //!   It's also the only way to get a pointer to it's pinned memory location.
 //!
-//! - Be aware that due to [rust issue #638181](https://github.com/rust-lang/rust/issues/63818) we currently
-//!   must use a `Pin<&>` + interior mutability while once that issue is fixed the poll methods will switch
-//!   to `Pin<&mut>` and interior stack mutability will be archived by 1st using something like a `UnsafeAliasingCell`
-//!   which "punch holes" the implicit `&mut` aliasing to all fields and then combining this with a `UnsafeCell` to
-//!   gain mutability again (but now potentially accessed from different thread/interrupt while there is a `&mut` borrow
-//!   for polling.)
-//!
-//! - If a pointers (in-)to the [`OperationInteraction`] is passed to whatever executes the DMA then it always should only
-//!   be to a field inside of the [`OperationInteraction`] instance but not the [`OperationInteraction`] itself. This is
-//!   to make it impossible to call `poll*()` parallely and to make it easier to migrate to `UnsafeAliasingCell` or whatever
-//!   the rust-language will introduce to work around issue #63818.
-//!
-//! - If a pointer (in-)to the [`OperationInteraction`] is passed to whatever executes the DMA then following (slightly
+//! - If a pointer (in-)to the [`OperationInteraction`] is passed to whatever executes the operation then following (slightly
 //!   redundant) rules MUST be uphold to make it safe:
 //!   - Only during the operation can the pointer be dereferenced, only during that time can
 //!     a reference based on that pointer exist (even if not used).
-//!   - While there a reference base on that pointer exists [`OperationInteraction.make_sure_operation_ended()`]
+//!   - While a reference base on that pointer exists, [`OperationInteraction.make_sure_operation_ended()`]
 //!     MUST NOT return. Even if it's guaranteed that the reference is not used anymore.
 //!   - After [`OperationInteraction.make_sure_operation_ended()`] returned the pointer must no longer be dereferenced
 //!     at all, even if the resulting reference is not used. It's strongly recommended to discard the pointer once the
@@ -360,65 +359,28 @@
 //!     potentially returning) and references being discards/the pointer no longer being dereferenced.
 //!   - It extremely important to understand that just the possibility of  *having* a reference to the
 //!     [`OperationInteraction`] instance after the completion becomes public can already trigger
-//!     undefined behavior in the compiler backend and must avoided at all cost.
+//!     undefined behavior in the compiler backend and must avoided at all cost. The reason we need it that
+//!     strict is because anything which allows us to act less strict is 100% unstable implementations details.
+//!     (Also currently annotations like `noaliase` and `dereferenceable` are potentially used).
 //!
 //! - Whatever is used to implement an operation should make sure that it *does not leak it's way to notify
 //!   that the operation completed*. Because if it does we have the problem that we either will have a permanently
 //!   pending future or a permanently hanging `drop` method. Which both are really really bad. (This is the
-//!   price for temporary handing out ownership of stack allocated buffers).
+//!   price for temporary handing out ownership of stack allocated values).
 //!
 //! - Whatever is used to implement an operation must make sure the `Result` type has the right trait bound
 //!   nearly all operations happen semantically outside of the thread so nearly all operations need the
 //!   result type to be `Send`.
 //!
-//! Below is the **pseudo-code** of how a function starting a DMA transfer might look:
+//! - [`crate::hooks::get_sync_awaiting_hook()`] provides a standard way to use a (fused) poll function inside
+//!   of [`OperationInteraction.make_sure_operation_ended()`]. This allows normally writing one poll function
+//!   for both the sync and async polling for completion. The `no_std` default implementation of hook will
+//!   just busy poll the future for completion. If the `std` feature is enabled thread parking is used to
+//!   await completion. Other platform specific methods (or diagnostics) can be used by replacing the *global*
+//!   hook.
 //!
-//! FIXME: Test that pseudo code in a integration test.
-//!
-//! ```ignore
-//! // call like `start_dma_operation(buffer.reborrow(), Direction::FromMemory, Periphery::FooBarDataPort).await;`
-//! async fn start_dma_operation<'a, T, C >(
-//!     mut buffer: EABufferHandle<'a, T::Word, DMAInteraction>,
-//!     direction: Direction,
-//!     channel: C, //the lifetime sucks bad time, we will fix that in newer version
-//!     target: T
-//! ) -> DMAOperationHandle
-//! where
-//!     T: dma::Target
-//!     C: dma::Channel
-//! {
-//!     buffer.cancellation().await;
-//!     let (ptr, len) = buffer.get_buffer_ptr_and_len();
-//!     let interaction = DMAInteraction::new(ptr, len, channel, target);
-//!     // Safe: We register the right interaction.
-//!     let inner_operation_handle = unsafe { buffer.try_register_new_operation(interaction) };
-//!     // SAFE(unwrap): We made sure the operation ended by polling cancellation
-//!     let operation_handle = operation_handle.unwrap();
-//!     let operation_handle = setup_completion_interrupt::<T,C>(operation_handle);
-//!     // SAFE: We must only call `start` once before it started.
-//!     unsafe { operation_handle.start() };
-//!     operation_handle
-//! }
-//!
-//! fn setup_completion_interrupt<T,C>(operation_handle: OperationHandle<T::Word, DMAInteraction>) -> DMAOperationHandle
-//! where
-//!     T: dma::Target,
-//!     C: dma::Channel
-//! {
-//!     let op_int: DMAInteraction = operation_handle.operation_interaction();
-//!     let completer = op_int.state_anchor.create_completer();
-//!     let interrupt_data_slot = get_interrupt_data_slot_for_channel(&op_int.channel);
-//!     interrupt_data_slot.set_completer(completer);
-//!     DMAOperationHandle { inner: operation_handle }
-//! }
-//!
-//! //[...]
-//! let (buffer, channel, target, result) =  dma_op_handle.completion().await;
-//! if let DMAResult::Completed = result {
-//!     //[...]
-//! }
-//! //[...]
-//! ```
+//! Take a look at the `atomic_state` module and the use-case tests to look for examples how [`OperationInteraction`]
+//! could be used.
 //!
 //! ### Handling task waking and completion awaiting.
 //!
@@ -454,9 +416,8 @@
 //! For example a CAS based DAM operation which calls wake from a interrupt handler must
 //! make sure the used scheduler can handle that.
 //!
-//! The [`op_int_utils`] module contains some helpful utilities for implementing aboves
-//! pattern using atomics in a way which should work with interrupts *if* waking a waker
-//! in the used async runtime can be done from an interrupt.
+//! The [`crate::op_int_utils::atomic_state`] contains a generic lock-free (and potentially wait-free)
+//! implementation of an  [`OperationInteraction`].
 //!
 #![no_std]
 
@@ -476,18 +437,18 @@ use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, marker::Pha
 /// # Unsafe-Contract
 ///
 /// The implementor MUST guarantee that after [`OperationInteraction.make_sure_operation_ended()`]
-/// the operation did end and the buffer is no longer accessed in ANY way
-/// by the operation. This means there must no longer be any references
-/// to the [`OperationInteraction`] from the outside (even if not used)
-/// neither must pointer from the outside to the [`OperationInteraction`] instance
-/// no longer be dereferenced.
+/// the operation did end and the value from the anchor is no longer accessed in ANY way
+/// by the operation. Neither must the operation have any form of `&`/`&mut` ref to it.
+///
+/// The same is true for any reference to the [`OperationInteraction`] which was handed out.
 ///
 /// See the method documentation of [`OperationInteraction.make_sure_operation_ended()`] for more
 /// details.
 pub unsafe trait OperationInteraction {
     /// Type of which value is returned on completion.
     ///
-    /// A value which indicates which the operation failed or succeeded can returned.
+    /// A typical type would be something like `Result { Succeeded, Failed }`. Through
+    /// other more complex values can be returned, too.
     ///
     /// Note that most operations happen semantically outside of the thread, so in
     /// most probably all cases `Result` should be `Send`
@@ -510,13 +471,16 @@ pub unsafe trait OperationInteraction {
     /// - This method will be called both in sync and async code. It MUST NOT depend on environmental
     ///   context provided by an async runtime/executor/scheduler or similar.
     ///
-    /// - It MUST be no problem to call this method more then once.
-    ///   (FIXME: We should be able to guarantee that it's only called once by us?)
+    /// - The library guarantees to only call this method once. But [`StackValueHandle.operation_interaction()`]
+    ///   can always be used to get a pinned reference to the operation interaction and as such this method can
+    ///   theoretically be called twice. So it is okay to panic or abort if this is called twice, as this should
+    ///   not happen normally.
     ///
     /// # Panic = Abort
     ///
     /// Due to safety reason a panic in a call to this method will cause an
-    /// abort as we can no longer be sure that the buffer is accessible but
+    /// abort if the method was called by this library. This is necessary as
+    /// we can no longer be sure that the buffer is accessible but
     /// as the buffer might be on the (real) stack we can also not leak it.
     ///
     /// # Safety
@@ -531,7 +495,7 @@ pub unsafe trait OperationInteraction {
     /// Because of this this library is only nice for cases where we can make
     /// sure a operation either completed or was canceled.
     ///
-    /// Note that except on `Drop` of the anchor, `poll_complete` will always
+    /// Note that except on `Drop` of the anchor, `poll_complete` will likely
     /// be polled before this method is called so if you can no longer say
     /// if it completed or not it's can be better to hang the future and with
     /// that permanently leak the buffer instead of hanging the thread.
@@ -544,7 +508,9 @@ pub unsafe trait OperationInteraction {
     /// operation. It *does not* mean has ended through cancellation.
     ///
     /// For operations which do not support cancellation this has a
-    /// default implementation which instantly completes.
+    /// default implementation which instantly completes. Even operations
+    /// which support cancellation can always return `Ready(())` before
+    /// the operation is canceled/starts cancelling.
     ///
     /// # Extended poll guarantees.
     ///
@@ -564,7 +530,7 @@ pub unsafe trait OperationInteraction {
     /// `make_sure_operation_ended` will *always* be called before allowing
     /// re-using the buffer for a new operation.
     ///
-    /// # Implementor Warning
+    /// # Implementor Warning (detached)
     ///
     /// The completion of the operation should *never* depend on this method
     /// being polled. Because:
@@ -575,6 +541,19 @@ pub unsafe trait OperationInteraction {
     /// So polling this should never drive the operation to completion,
     /// only check for it to be completed.
     ///
+    /// # Implementor Warning (Sync)
+    ///
+    /// While this library will not call `poll_completion` after it returned
+    /// ready it should be noted that by using [`StackValueHandle.operation_interaction()`]
+    /// any user of this library can always get a `Pin<&>`-ref to the instance,
+    /// which could be used to all `poll_complete` after it returned `Ready`.
+    ///
+    /// Furthermore if this instance is `Sync` it could be shared to other threads
+    /// and polled parallel from there. Therefore it's recommended to make the
+    /// [`OperationInteraction`] instance `!Sync`. To still allow sharing it with
+    /// the thing executing the operation it often can be a good idea to have an
+    /// internal instance which is `Sync` and wrap it into a public `!Sync` type.
+    ///
     /// # Wakers
     ///
     /// See the module level documentation about how to implement this in
@@ -582,31 +561,24 @@ pub unsafe trait OperationInteraction {
     ///
     /// # Poll Semantics
     ///
-    /// Polling this after it returned `Ready` is allowed to panic.
+    /// Polling this after it returned `Ready` is allowed to panic or abort.
     fn poll_completion(self: Pin<&Self>, cx: &mut Context) -> Poll<Self::Result>;
 }
 
 //Note: I could use #[pin_project] but I have additional
 //      restrictions for `operation_interaction` and need
 //      to project into the option. So it's not worth it.
-pub struct EABufferAnchor<'a, V, OpInt>
+pub struct StackAnchor<'a, V, OpInt>
 where
+    V: ?Sized,
     OpInt: OperationInteraction,
 {
-    /// We store the buffer as a tuple of a pointer to it's start and it's length.
+    /// Pointer to the underlying stack value which is guaranteed to lie on the same stack as this anchor is pinned to.
     ///
-    /// The reason for this are:
-    ///
-    /// 1. It's the format most (all?) operators accept as input.
-    /// 2. There is currently no reliable way on stable to get then length out of
-    ///    an `*mut [V]` fat pointer. And the methods returning the pointer and length
-    ///    *might* be called before a pending but detached/leaked operation finished (which
-    ///    is ok as long as they don't use the pointer).
-    /// 3. There is a stable way to create a `&mut [V]` from the pointer to the start and
-    ///    the length. (Which MUST only be used once any previous operation ended and a new
-    ///    `OperationInteraction` instance for it was registered).
-    ///
-    buffer: (*mut V, usize),
+    /// To prevent any potential problems with aliasing we store a `*mut V` instead of an `&mut V` but with some small
+    /// API changes wrt. `get_ptr()` we could store a `&mut V` as far as I know. But I prefer to be on the safe site
+    /// here.
+    value: *mut V,
 
     /// Combination of necessary type hints:
     ///
@@ -617,126 +589,106 @@ where
     ///    so if you need `!Unpin` you need to nearly always opt to explicitly hint this using
     ///    `PhantomPinned`.  The reason this type must be `!Unpin` is because in some situations
     ///    there will be something like self-references to it.
-    buffer_type_hint: PhantomData<(&'a mut [V], PhantomPinned)>,
+    type_hints: PhantomData<(&'a mut V, PhantomPinned)>,
 
     /// Type to interact with ongoing operations.
     ///
-    /// # Pin Safety (wrt. Pin<&Self>)
+    /// # Pin guarantees
     ///
-    /// This type doesn't use any self-referencing to this field, but
-    /// [`OperationInteraction`] instances might be self-referential.
+    /// - If this value in the cell is `None` it should be treated as if it's not pinned.
     ///
-    /// If it is `None` it always can safely be replaced with `Some`.
+    /// - If the value is the cell is `Some` it MUST be treated as if pinned, to set it back
+    ///   to none you must first call [`OperationInteraction.make_sure_operation_ended()`] and
+    ///   then drop it *in place*.
     ///
-    /// This field should never be `Some` if `Self` is not pinned.
+    /// # &mut/Cell guarantees
     ///
-    /// If it's `Some` we MUST treat it as if it's pinned.
+    /// - If the value in the cell is `None` the anchor (and in turn the [`StackValueHandle`])
+    ///   can freely access the cell as `&mut`, given they take a `&mut self` reference.
     ///
-    /// After [`OperationInteraction.make_sure_operation_ended()`] returned we
-    /// have the guarantee that we can safely drop the [`OperationInteraction`]
-    /// **in-place**, after which we can safely replace the `Some` with `None`.
+    /// - If the value in the cell is `Some` the cell MUST NOT be accessed with a `&mut` until
+    ///   [`OperationInteraction.make_sure_operation_ended()`] was called. Then it can be accessed
+    ///   mutable to drop the instance in place and set the option to `None`.
     ///
-    //FIXME: Reformulate:
-    /// Accessing the `UnsafeCell` as `&mut `is safe *if and only if* either
-    /// the operation did not yet start (it's `None`) or the
-    /// operation completed, i.e. [`OperationInteraction.make_sure_operation_ended()`]
-    /// was run and returned and no new operation was registered afterwards.
+    /// - If the value in the cell is `Some` (and [`OperationInteraction.make_sure_operation_ended()`]
+    ///   was not yet called) then there might be external `&`-like references to the [`OperationInteraction`]
+    ///   instance. Once [`OperationInteraction.make_sure_operation_ended()`] was called that reference
+    ///   MUST NOT exist anymore as then the instance is accessed through a `&mut`-ref which guarantees no
+    ///   aliasing is happening. (And it's then dropped which would invalidate the ref.)
     ///
-    /// Given that this anchor is neither `Send` nor `Sync` we can be sure that
-    /// under aboves circumstances (None or completed) there is no concurrent access
-    /// to the field and as such accessing it as `&mut` is safe (as already mentioned).
-    ///
-    //Hint: We know it's not `Sync`/`Send` due to the `*mut W` pointer and the `UnsafeCell`.
-    ///
-    /// So if we want to set it to none or replace it with another
-    /// operation we MUST do following:
-    ///
-    /// 1. first calling [`OperationInteraction.make_sure_operation_ended()`] on it
-    ///    **without** moving it
-    /// 2. dropping it in place
-    ///
-    /// Failing to do so is treated as `unsafe`. This also counts for
-    /// this types `Drop::drop` implementation.
-    ///
-    /// This allows us to not only allow the remote accessor to access
-    /// the buffer but also to allow it to access (well defined) parts
-    /// of the `OpInt` instance. Which e.g. could be used by an interrupt
-    /// to indicate the completion of an operation or get the current
-    /// waker of an future polling on `poll_completion` and waking it (
-    /// assuming the async runtime implements wake in a way which can
-    /// be called from an interrupt).
     operation_interaction: UnsafeCell<Option<ManuallyDrop<OpInt>>>,
 }
 
-impl<'a, V, OpInt> EABufferAnchor<'a, V, OpInt>
+impl<'a, V, OpInt> StackAnchor<'a, V, OpInt>
 where
+    V: ?Sized,
     OpInt: OperationInteraction,
 {
-    /// Create a new instance with given buffer.
+    /// Create a new instance with given value.
     ///
     /// # Safety
     ///
-    /// 1. You can pass any buffer in where you guarantee that it only can be re-purposed
-    ///   after the anchor is dropped and that if the anchor is leaked the buffer is
-    ///   guaranteed to be leaked, too.
+    /// 1. You can pass a `&mut`-reference to any value in where you guarantee that it only
+    ///   can be re-purposed after the anchor is dropped and that if the anchor is leaked
+    ///   the value is guaranteed to be leaked, too.
     ///
-    /// 2. You must `Pin` the anchor by using the `EABufferHandle` type and make sure it's
+    /// 2. You must `Pin` the anchor by using the [`StackValueHandle`] type and make sure it's
     ///    pinned in a way that `1.` is still uphold.
+    ///
+    /// 3. Between creating the anchor and pinning it through a [`StackValueHandle`] you must guarantee
+    ///    not to move it in any way which would invalidate point 1.
     ///
     /// It **very strongly** recommended always do following:
     ///
-    /// 1. Have the buffer on the stack directly above the anchor.
-    /// 2. `Pin` the anchor using [`EABufferHandle::new_unchecked()`] to the stack immediately after
+    /// 1. Have the value on the stack directly above the anchor.
+    /// 2. `Pin` the anchor using [`StackValueHandle::new_unchecked()`] to the stack immediately after
     ///    constructing it
-    /// 3. Use the `EABufferHandle` to shadow the anchor.
+    /// 3. Use the `StackValueHandle` to shadow the anchor.
     ///
     /// This is the most simple way to guarantee the unsafe contract is uphold.
     ///
     /// See module level documentation for more details.
-    pub unsafe fn new_unchecked(buffer: &'a mut [V]) -> Self {
-        EABufferAnchor {
-            buffer_type_hint: PhantomData,
-            buffer: (buffer as *mut _ as *mut V, buffer.len()),
+    pub unsafe fn new_unchecked(value: &'a mut V) -> Self {
+        StackAnchor {
+            type_hints: PhantomData,
+            value: value as *mut _ as *mut V,
             operation_interaction: UnsafeCell::new(None),
         }
     }
 }
 
-impl<'a, V, OpInt> Drop for EABufferAnchor<'a, V, OpInt>
+impl<'a, V, OpInt> Drop for StackAnchor<'a, V, OpInt>
 where
+    V: ?Sized,
     OpInt: OperationInteraction,
 {
     fn drop(&mut self) {
         // Safe: We are about to drop self and can guarantee it's no longer moved before drop
-        let mut handle = unsafe { EABufferHandle::new_unchecked(self) };
+        let mut handle = unsafe { StackValueHandle::new_unchecked(self) };
         handle.cleanup_operation();
     }
 }
 
-/// Handle to access the stack pinned buffer.
+/// Handle to interact with the external accessible stack anchored value.
 ///
-/// You can use this handle in two ways:
+/// You can treat this handle in two ways:
 ///
-/// - As if it's a `&mut buffer`, using [`EABufferHandle.reborrow()`] is used for reborrowing.
-/// - Passing around a `&mut handle` treating it roughly as if it is the buffer itself.
+/// - As if it's a `&mut value`, using [`StackValueHandle.reborrow()`] is used for reborrowing.
+/// - Passing around a `&mut handle` treating it roughly as if it is the value itself.
 ///
 /// The handler provides a variety of mostly `&mut self` and `async` methods to access the
-/// buffer, wait for completion of ongoing operations, request the cancellation of ongoing
+/// value, wait for completion of ongoing operations, request the cancellation of ongoing
 /// operation and register new operations.
 ///
 /// Most methods even such which you would normally be `&self` are `&mut self` as they need
 /// `&mut` aliasing guarantees due to necessary internal book keeping.
 ///
-/// **Normally, you don't want to create this manual but instead use the `ra_buffer`
-/// macro to create the buffer, anchor and handle at once in a guaranteed to be safe way.**
+/// **Normally, you don't want to create this manual but instead use the [`ea_stack_value!()`]
+/// macro to create the anchor and handle in a guaranteed to be safe way.**
 ///
-///
-/// This type contains a (stack) pinned reference to the anchor and through this to the buffer.
-/// This type acts roughly as a (stack) `Pin<&mut Anchor>` (through due to limitations of rust
-/// and other implementation details it uses a `Pin<&Anchor>` + interior mutability and access
-/// only through `&mut self` methods.)
-pub struct EABufferHandle<'a, V, OpInt>
+pub struct StackValueHandle<'a, V, OpInt>
 where
+    V: ?Sized,
     OpInt: OperationInteraction,
 {
     /// WARNING: While we have a `Pin<&Anchor>` it should be treated as
@@ -747,11 +699,12 @@ where
     ///          This means we must not expose the underlying `Pin` or
     ///          a [`Pin.as_ref()`] based re-borrow. A [`Pin.as_mut()`]
     ///          based re-borrow is fine.
-    anchor: Pin<&'a EABufferAnchor<'a, V, OpInt>>,
+    anchor: Pin<&'a StackAnchor<'a, V, OpInt>>,
 }
 
-impl<'a, V, OpInt> EABufferHandle<'a, V, OpInt>
+impl<'a, V, OpInt> StackValueHandle<'a, V, OpInt>
 where
+    V: ?Sized,
     OpInt: OperationInteraction,
 {
     /// Create a new handle pinning the anchor to the stack.
@@ -761,32 +714,32 @@ where
     /// This calls [`Pin::new_unchecked()`] and inherites the unsafe contract from it.
     ///
     /// Furthermore this must be used correctly as described in the unsafe-contract from
-    /// `EABufferAnchor::new_unchecked()`.
+    /// [`StackAnchor::new_unchecked()`].
     ///
     /// Similar to `pin_utils::pin_mut!` it's fully safe if this is directly used after
-    /// creating a `EABufferAnchor` on the stack and we shadow the variable the anchor
+    /// creating a [`StackAnchor`] (correctly) on the stack and we shadow the variable the anchor
     /// was created in.
-    pub unsafe fn new_unchecked<'b>(anchor: &'a mut EABufferAnchor<'b, V, OpInt>) -> Self
+    pub unsafe fn new_unchecked<'b>(anchor: &'a mut StackAnchor<'b, V, OpInt>) -> Self
     where
         'b: 'a,
     {
         // lifetime collapse (erase the longer living 'b and replace it with the
         // shorter living 'a also restore covariance, which is fine as we basically
-        // semantically collapse a `&mut &mut buffer` into a `&mut buffer`, i.e. we
+        // semantically collapse a `&mut &mut value` into a `&mut value`, i.e. we
         // completely abstract way the fact that there is an additional indirection
         // in the anchor). If we could not do so as following we would have turned the
-        // handle into a fat pointer directly pointing the both the anchor and the buffer!
-        let anchor: &'a EABufferAnchor<'a, V, OpInt> = anchor;
+        // handle into a fat pointer directly pointing the both the anchor and the value!
+        let anchor: &'a StackAnchor<'a, V, OpInt> = anchor;
         // Safe: because of
         //   - the guarantees given when calling this function
         //   - the guarantees given when creating the anchor
         let anchor = Pin::new_unchecked(anchor);
-        EABufferHandle { anchor }
+        StackValueHandle { anchor }
     }
 
     /// Re-borrows the handle in the same way you would re-borrow a `&mut T` ref.
-    pub fn reborrow(&mut self) -> EABufferHandle<V, OpInt> {
-        EABufferHandle {
+    pub fn reborrow(&mut self) -> StackValueHandle<V, OpInt> {
+        StackValueHandle {
             anchor: self.anchor,
         }
     }
@@ -812,76 +765,88 @@ where
         op_int
     }
 
-    /// Returns a mut reference to the underling buffer.
+    /// Returns a mut reference to the underling value.
     ///
     /// If a operations is currently in process it first awaits the end of the operation.
     /// This will not try to cancel the operation. The result and a mut-ref to the underlying
-    /// buffer is returned.
+    /// value are returned.
     ///
     /// This will not try to cancel any ongoing operation. If you need that you
-    /// should await [`EABuffer::request_cancellation()`] before calling this
+    /// should await [`StackValueHandle.request_cancellation()`] before calling this
     /// method.
     ///
-    /// Note that there is no `buffer`/`buffer_ref` as we always need a `&mut self`
-    /// anyway to access the buffer.
-    pub async fn get_buffer_after_completion(&mut self) -> (&mut [V], Option<OpInt::Result>) {
+    pub async fn access_value_after_completion(&mut self) -> (&mut V, Option<OpInt::Result>) {
         let res = self.reborrow().completion().await;
-        let (ptr, len) = self.anchor.buffer;
         //SAFE: no ongoing operation means no self-references so &mut self is enough
-        let buffer = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-        (buffer, res)
+        let value = unsafe { &mut *self.anchor.value };
+        (value, res)
     }
 
-    /// Returns a mut reference to the underlying buffer if there is no ongoing operation
-    pub fn try_get_buffer_mut(&mut self) -> Option<&mut [V]> {
+    /// Returns a mut reference to the underlying value if there is no ongoing operation
+    ///
+    /// The `&mut self` borrow makes sure we can't start a new operation while we have
+    /// an reference to the underlying value.
+    pub fn try_access_value_mut(&mut self) -> Option<&mut V> {
         if self.has_pending_operation() {
             None
         } else {
-            let (ptr, len) = self.anchor.buffer;
             //SAFE: no ongoing operation means no self-references so &mut self is enough
-            Some(unsafe { core::slice::from_raw_parts_mut(ptr, len) })
+            Some(unsafe { &mut *self.anchor.value })
         }
     }
 
-    /// Returns a reference to the underlying buffer if there is no ongoing operation
-    pub fn try_get_buffer(&self) -> Option<&[V]> {
+    /// Returns a reference to the underlying value if there is no ongoing operation
+    ///
+    /// The `&self` borrow makes sure we can't start a new operation while we have
+    /// an reference to the underlying value.
+    pub fn try_access_value(&self) -> Option<&V> {
         if self.has_pending_operation() {
             None
         } else {
-            let (ptr, len) = self.anchor.buffer;
             //SAFE: no ongoing operation means no self-references so &self is enough
-            Some(unsafe { core::slice::from_raw_parts(ptr, len) })
+            Some(unsafe {  &*self.anchor.value })
         }
     }
 
-    /// Return a pointer to the start of the the underlying buffer and it's size.
+    /// Return a pointer to the start of the the underlying value.
     ///
     /// # Safety
     ///
-    /// You must guarantee that you only use the pointer after you installed
-    /// a appropriate `OperationInteraction` with [`EABufferAnchor.try_register_new_operation()`].
+    /// You must guarantee that you only dereference the pointer after you registered
+    /// an appropriate [`OperationInteraction`] with [`StackAnchor.try_register_new_operation()`].
     ///
     /// The reason why we have this unsafe method instead of returning the pointer
-    /// from [`EABufferAnchor.try_register_new_operation()`] is because you
+    /// from [`StackAnchor.try_register_new_operation()`] is because you
     /// might need it to create the `OperationInteraction` instance.
-    pub fn get_buffer_ptr_and_len(&self) -> (*mut V, usize) {
-        self.anchor.buffer
+    ///
+    /// The reason why this method is safe is because we store the value internally as pointer
+    /// and as such can just return the pointer, even if there is an ongoing operation. Naturally
+    /// this *doesn't mean* you can use the pointer while there is an unrelated ongoing operations.
+    pub fn get_ptr(&self) -> *mut V {
+        self.anchor.value
     }
 
-    /// Set's a new operations interaction iff there is currently no ongoing interaction.
+    /// Set's a new operations interaction iff there is currently no ongoing operation.
     ///
-    /// The returned `OperationHandle` should normally be wrapped by a type specific to
+    /// The returned [`OperationHandle`] should normally be wrapped by a type specific to
     /// the operation e.g. some `dma::Transfer` type or similar.
     ///
     /// Code using this should first do a `cancellation().await` (or `completion().await`)
     /// to make sure this won't fail.
     ///
+    /// Normally you call [`StackValueHandle.get_ptr()`] beforehand to get a pointer
+    /// to the underlying value and pass it into the constructor of an [`OperationInteraction`]
+    /// instance you try to register. Then you register it and *only then* you use
+    /// [`StackValueHandle.operation_interaction()`] to access it in a pinned version and
+    /// start the operation.
+    ///
     /// # Safety
     ///
-    /// 1. You must only start any new operation after this method returns.
+    /// 1. You must only start any new operation after this method returns with ok.
     /// 2. You pass in the right `OperationInteraction` instance which guarantees
     ///    that once its `make_sure_operation_ended` method returns the operation
-    ///    does no longer access the buffer in any form.
+    ///    does no longer access the value in any form.
+    ///
     pub unsafe fn try_register_new_operation(
         self,
         new_op_int: OpInt,
@@ -905,20 +870,20 @@ where
     /// Returns true if there is a "pending" operation.
     ///
     /// This operation might already have been completed but
-    /// [`EABufferAnchor.cleanup_operation()`] wasn't called yet
-    /// (which also means that we did neither await [`EABufferAnchor.completion()`] nor
-    /// [`EABufferAnchor.cancellation()`])
+    /// [`StackAnchor.cleanup_operation()`] wasn't called yet
+    /// (which also means that we did neither await [`StackAnchor.completion()`] nor
+    /// [`StackAnchor.cancellation()`])
     pub fn has_pending_operation(&self) -> bool {
         self.operation_interaction().is_some()
     }
 
     /// If there is an ongoing operation notify it to be canceled.
     ///
-    /// This is normally called implicitly through the `OperationHandle`
+    /// This is normally called implicitly through the [`OperationHandle.cancellation()`]
     /// which is often wrapped in some operation specific type.
     ///
     /// Calling this directly is only possible if the `OperationHandle`
-    /// has been leaked or detached.
+    /// has been discarded.
     pub async fn request_cancellation(&mut self) {
         if let Some(op_int) = self.operation_interaction() {
             futures_lite::future::poll_fn(|ctx| op_int.poll_request_cancellation(ctx)).await;
@@ -929,13 +894,15 @@ where
     ///
     /// Returns the result if there was a ongoing operation.
     ///
-    /// This will await `op_int.poll_completion` and then call `cleanup_operation`.
+    /// This will await [`OperationInteraction.poll_completion()`] and then calls
+    /// [`StackValueHandle.cleanup_operation()`] which will internally call
+    /// [`OperationInteraction.make_sure_operation_ended()`].
     ///
-    /// This is normally called implicitly through the `OperationHandle`
+    /// This is normally called implicitly through the [`OperationHandle`]
     /// which is often wrapped in some operation specific type.
     ///
-    /// Calling this directly is only possible if the `OperationHandle`
-    /// has been leaked or detached.ge).
+    /// Calling this directly is only possible if the [`OperationHandle`]
+    /// has been discarded.
     pub async fn completion(&mut self) -> Option<OpInt::Result> {
         let mut result = None;
         if let Some(op_int) = self.operation_interaction() {
@@ -954,14 +921,16 @@ where
     ///
     /// Returns the result if there was a ongoing operation.
     ///
-    /// This will first await `op_int.poll_request_cancellation`, then `op_int.poll_completion`
-    /// and then calls `cleanup_operation`.
+    /// This will first await [`OperationInteraction.poll_request_cancellation()`],
+    /// then [`OperationInteraction.poll_completion()`]
+    /// and then calls [`StackValueHandle.cleanup_operation()`] which internally calls
+    /// [`OperationInteraction.make_sure_operation_ended()`].
     ///
-    /// This is normally called implicitly through the `OperationHandle`
+    /// This is normally called implicitly through the [`OperationHandle`]
     /// which is often wrapped in some operation specific type.
     ///
     /// Calling this directly is only possible if the `OperationHandle`
-    /// has been leaked or detached.
+    /// has been discarded.
     pub async fn cancellation(&mut self) -> Option<OpInt::Result> {
         self.request_cancellation().await;
         self.completion().await
@@ -972,7 +941,7 @@ where
     /// This must be called before trying to set a new operation, but
     /// is implicitly called by `completion` and `cancellation`.
     ///
-    /// This should normally *not* be called directly but only implicitly
+    /// This **should normally *not* be called directly** but only implicitly
     /// through `completion().await` or `cancellation().await`. Through there
     /// are some supper rare edge cases where exposing it is use-full.
     //HINT: This must be `&mut self` or else the `operation_interaction()` method
@@ -1004,67 +973,79 @@ where
     }
 }
 
-/// Type wrapping a `EABufferHandle` which has a currently ongoing operation.
+/// Type wrapping a [`StackValueHandle`] encoding that there is currently an ongoing operation.
 pub struct OperationHandle<'a, V, OpInt>
 where
+    V: ?Sized,
     OpInt: OperationInteraction,
 {
-    anchor: EABufferHandle<'a, V, OpInt>,
+    anchor: StackValueHandle<'a, V, OpInt>,
 }
 
 impl<'a, 'r, V, OpInt> OperationHandle<'a, V, OpInt>
 where
+    V: ?Sized,
     OpInt: OperationInteraction,
 {
 
-    /// See [`EABufferHandle.get_buffer_after_completion()`]
+    /// See [`StackValueHandle.access_value_after_completion()`]
     ///
     /// But needs a closure as we can't return a &mut [V] in a method consuming self.
-    pub async fn get_buffer_after_completion<R>(mut self, buffer_access: impl FnOnce(&mut [V], OpInt::Result) -> R) -> R {
-        let (buffer, res) = self.anchor.get_buffer_after_completion().await;
-        buffer_access(buffer, res.unwrap())
+    pub async fn access_value_after_completion<R>(mut self, value_access: impl FnOnce(&mut V, OpInt::Result) -> R) -> R {
+        let (value, res) = self.anchor.access_value_after_completion().await;
+        value_access(value, res.unwrap())
     }
 
-    /// See [`EABufferHandle.completion()`].
+    /// See [`StackValueHandle.completion()`].
     pub async fn completion(mut self) -> OpInt::Result {
-        //SAFE[UNWRAP]: We unique borrow/own the EABufferHandle through this type
+        //SAFE[UNWRAP]: We unique borrow/own the StackValueHandle through this type
         //              and the type guarantees that there is an "ongoing" operation
         //              and we consume this type in this function call.
         self.anchor.completion().await.unwrap()
     }
 
-    /// See [`EABufferHandle.cancellation()`]
+    /// See [`StackValueHandle.cancellation()`]
     pub async fn cancellation(mut self) -> OpInt::Result {
-        //SAFE[UNWRAP]: We unique borrow/own the EABufferHandle through this type
+        //SAFE[UNWRAP]: We unique borrow/own the StackValueHandle through this type
         //              and the type guarantees that there is an "ongoing" operation
         //              and we consume this type in this function call.
         self.anchor.cancellation().await.unwrap()
     }
 
-    /// See [`EABufferHandle.request_cancellation()`]
+    /// See [`StackValueHandle.request_cancellation()`]
     pub async fn request_cancellation(&mut self) {
         self.anchor.request_cancellation().await;
     }
 
-    /// See [`EABufferHandle.operation_interaction()`]
+    /// See [`StackValueHandle.operation_interaction()`]
     pub fn operation_interaction(&self) -> Option<Pin<&OpInt>> {
         self.anchor.operation_interaction()
     }
 }
 
 #[macro_export]
-macro_rules! ra_buffer {
-    ($name:ident = [$init:literal; $len:literal] of $OpInt:ty) => (
-        let mut $name = [$init; $len];
+macro_rules! ea_stack_value {
+    ($name:ident $(: $type:ty)? = $create:expr) => (
+        // Make sure value is on the stack
+        // For better understanding: This is similar in how it
+        // works to the `pin_utils::pin_mut!` macro.
+        let mut $name = $create;
+        // Create the anchor, also coerce the type e.g. a `&mut [u8; 32]` => `&mut [u8]` coercion.
         // SAFE:
-        // 1. We can use the buffer as it's directly on the stack above the anchor
+        // 1. We can use the value as it's directly on the stack above the anchor
         // 2. We directly pin the anchor to the stack as it's required.
-        let mut $name = unsafe { $crate::EABufferAnchor::<_, $OpInt>::new_unchecked(&mut $name) };
+        let mut $name = unsafe { $crate::StackAnchor::new_unchecked(&mut $name as _)};
+        // Pin the anchor to the stack.
         // SAFE:
-        // 1. Works like `pin_mut!` we shadow the same stack allocated buffer to prevent any non-pinned
+        // 1. Works like `pin_mut!` we shadow the same stack allocated value to prevent any non-pinned
         //    access to it.
-        //FIXME: Update SAFE doc
-        let mut $name = unsafe { $crate::EABufferHandle::new_unchecked(&mut $name) };
+        // 2. We didn't move the anchor at all it's still on the same stack as the value.
+        let mut $name = unsafe {
+            // Make sure the type is in the scope so that we can use it in the type-hint without explicit import.
+            use $crate::StackValueHandle;
+            let tmp $(: $type)? = StackValueHandle::new_unchecked(&mut $name);
+            tmp
+        };
     );
 }
 
@@ -1072,7 +1053,7 @@ macro_rules! ra_buffer {
 ///
 /// This can be useful if you have a DMA API which requires `'static` and uses buffer leaking
 /// for safety and you want (and can) to wrap it in a way which would work with a non-static
-/// [`EABufferHandle`] but you still need to pass in a `'static` buffer implementing the
+/// [`StackValueHandle`] but you still need to pass in a `'static` buffer implementing the
 /// `ReadBuffer` and `WriteBuffer` traits.
 #[cfg(feature = "embedded-dma")]
 pub struct UnsafeEmbeddedDmaBuffer<V> {
@@ -1084,77 +1065,64 @@ pub struct UnsafeEmbeddedDmaBuffer<V> {
 const _: () = {
     use embedded_dma::{ReadBuffer, Word, WriteBuffer};
 
-    unsafe impl<V>  Send for UnsafeEmbeddedDmaBuffer<V> where V: Send {}
+    unsafe impl<W>  Send for UnsafeEmbeddedDmaBuffer<W> where W: Send {}
 
-    impl<V> UnsafeEmbeddedDmaBuffer<V> {
+    impl<W> UnsafeEmbeddedDmaBuffer<W> {
         /// Create a new unsafe buffer.
         ///
         /// # Unsafe-Contract
         ///
         /// You must "somehow" make sure that for the whole lifetime of this
         /// type ptr and len are valid.
-        unsafe fn new(ptr: *mut V, len: usize) -> Self {
+        unsafe fn new(ptr: *mut W, len: usize) -> Self {
             Self { ptr, len }
         }
     }
 
-    unsafe impl<'a, V> ReadBuffer for UnsafeEmbeddedDmaBuffer<V>
+    unsafe impl<'a, W> ReadBuffer for UnsafeEmbeddedDmaBuffer<W>
     where
-        V: Word,
+        W: Word,
     {
-        type Word = V;
-        unsafe fn read_buffer(&self) -> (*const V, usize) {
-            (self.ptr as *const V, self.len)
+        type Word = W;
+        unsafe fn read_buffer(&self) -> (*const W, usize) {
+            (self.ptr as *const W, self.len)
         }
     }
 
-    unsafe impl<'a, V> WriteBuffer for UnsafeEmbeddedDmaBuffer<V>
+    unsafe impl<'a, W> WriteBuffer for UnsafeEmbeddedDmaBuffer<W>
     where
-        V: Word,
+        W: Word,
     {
-        type Word = V;
-        unsafe fn write_buffer(&mut self) -> (*mut V, usize) {
+        type Word = W;
+        unsafe fn write_buffer(&mut self) -> (*mut W, usize) {
             (self.ptr, self.len)
         }
     }
 
-    impl<'a, V, OpInt> EABufferHandle<'a, V, OpInt>
+    impl<'a, V, OpInt> StackValueHandle<'a, [V], OpInt>
     where
         V: Word,
         OpInt: OperationInteraction,
     {
-        /// Create a new unsafe buffer based on the underlying buffer.
+        /// Create a new unsafe buffer based on the underlying buffer, if there is no ongoing operation.
         ///
         /// # Unsafe-Contract
         ///
         /// You must "somehow" make sure that for the whole lifetime of this
         /// type ptr and len are valid.
-        pub unsafe fn unsafe_embedded_dma_buffer(&self) -> UnsafeEmbeddedDmaBuffer<V> {
-            let (ptr, len) = self.get_buffer_ptr_and_len();
-            UnsafeEmbeddedDmaBuffer::new(ptr, len)
-        }
-    }
-
-    unsafe impl<'a, V, OpInt> ReadBuffer for EABufferHandle<'a, V, OpInt>
-    where
-        V: Word,
-        OpInt: OperationInteraction,
-    {
-        type Word = V;
-        unsafe fn read_buffer(&self) -> (*const V, usize) {
-            let (ptr, len) = self.get_buffer_ptr_and_len();
-            (ptr as *const V, len)
-        }
-    }
-
-    unsafe impl<'a, V, OpInt> WriteBuffer for EABufferHandle<'a, V, OpInt>
-    where
-        V: Word,
-        OpInt: OperationInteraction,
-    {
-        type Word = V;
-        unsafe fn write_buffer(&mut self) -> (*mut V, usize) {
-            self.get_buffer_ptr_and_len()
+        ///
+        //TODO remove fallibility by getting length out of pointer
+        // - requires: slice_ptr_len #71146
+        // - alt requires: a pointer metadata/Pointee
+        pub unsafe fn try_get_unsafe_embedded_dma_buffer(&self) -> Option<UnsafeEmbeddedDmaBuffer<V>> {
+            if self.has_pending_operation() {
+                None
+            } else {
+                let fat_ptr = self.get_ptr();
+                //SAFE: as there is no pending operation
+                let len = (&*fat_ptr).len();
+                Some(UnsafeEmbeddedDmaBuffer::new(fat_ptr as *mut V, len))
+            }
         }
     }
 };
@@ -1174,27 +1142,26 @@ mod tests {
         #[async_std::test]
         async fn leaked_operations_get_canceled_and_ended_before_new_operations() {
             let mi = async {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
                 // If we leaked the op we still can poll on the buffer directly
-                let mi = call_and_leak_op(buffer.reborrow()).await;
+                let mi = call_and_leak_op(value.reborrow()).await;
                 mi.assert_not_run();
-                buffer.reborrow().completion().await;
+                value.reborrow().completion().await;
                 mi.assert_completion_run();
 
                 // If we create a new operation while one is still running the old one is first canceled.
-                let old_mi = call_and_leak_op(buffer.reborrow()).await;
+                let old_mi = call_and_leak_op(value.reborrow()).await;
                 old_mi.assert_not_run();
-                let mi = call_and_leak_op(buffer.reborrow()).await;
+                let mi = call_and_leak_op(value.reborrow()).await;
                 old_mi.assert_cancellation_run();
                 mi.assert_not_run();
-                buffer.reborrow().cancellation().await;
+                value.reborrow().cancellation().await;
                 mi.assert_cancellation_run();
 
                 {
                     // Doing re-borrows with as_mut() can be useful
                     // to avoid lifetime/move problems.
-                    let mut buffer = buffer.reborrow();
+                    let mut buffer = value.reborrow();
                     let (op, mi) = call_op(buffer.reborrow()).await;
                     mi.assert_not_run();
                     op.completion().await;
@@ -1210,7 +1177,7 @@ mod tests {
                     mem::forget(buffer);
                 }
 
-                let (mut op, mi) = call_op(buffer).await;
+                let (mut op, mi) = call_op(value).await;
                 mi.assert_not_run();
                 // We just indicate cancellation but don't wait for
                 // the cancellation to complete (just the notification that
@@ -1234,20 +1201,20 @@ mod tests {
             mi.assert_op_ended_enforced();
         }
 
-        async fn call_and_leak_op<'a>(buffer: EABufferHandle<'a, u8, OpIntMock>) -> MockInfo {
-            let (op, mock_info) = mock_operation(buffer).await;
+        async fn call_and_leak_op<'a>(value: StackValueHandle<'a, [u8], OpIntMock>) -> MockInfo {
+            let (op, mock_info) = mock_operation(value).await;
             mem::forget(op);
             mock_info
         }
 
         async fn call_op<'a>(
-            buffer: EABufferHandle<'a, u8, OpIntMock>,
-        ) -> (OperationHandle<'a, u8, OpIntMock>, MockInfo) {
-            mock_operation(buffer).await
+            value: StackValueHandle<'a, [u8], OpIntMock>,
+        ) -> (OperationHandle<'a, [u8], OpIntMock>, MockInfo) {
+            mock_operation(value).await
         }
     }
 
-    mod EABufferAnchor {
+    mod StackAnchor {
 
         mod try_register_new_operation {
             use super::super::super::*;
@@ -1255,13 +1222,13 @@ mod tests {
 
             #[async_std::test]
             async fn fails_if_a_operation_is_still_pending() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
 
-                let (_, mock) = mock_operation(buffer.reborrow()).await;
+                let (_, mock) = mock_operation(value.reborrow()).await;
 
-                let (ptr, len) = buffer.reborrow().get_buffer_ptr_and_len();
-                let (op_int, _, new_mock) = OpIntMock::new(ptr, len);
-                let res = unsafe { buffer.reborrow().try_register_new_operation(op_int) };
+                let ptr = value.reborrow().get_ptr();
+                let (op_int, _, new_mock) = OpIntMock::new(ptr);
+                let res = unsafe { value.reborrow().try_register_new_operation(op_int) };
                 assert!(res.is_err());
                 mock.assert_not_run();
                 new_mock.assert_not_run();
@@ -1269,12 +1236,12 @@ mod tests {
 
             #[async_std::test]
             async fn sets_the_operation() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (ptr, len) = buffer.reborrow().get_buffer_ptr_and_len();
-                let (op_int, _, mock) = OpIntMock::new(ptr, len);
-                let res = unsafe { buffer.reborrow().try_register_new_operation(op_int) };
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let ptr= value.reborrow().get_ptr();
+                let (op_int, _, mock) = OpIntMock::new(ptr);
+                let res = unsafe { value.reborrow().try_register_new_operation(op_int) };
                 assert!(res.is_ok());
-                assert!(buffer.reborrow().has_pending_operation());
+                assert!(value.reborrow().has_pending_operation());
                 mock.assert_not_run();
             }
         }
@@ -1285,42 +1252,42 @@ mod tests {
 
             #[async_std::test]
             async fn does_not_change_anything_if_there_was_no_pending_operation() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (ptr, len) = buffer.reborrow().get_buffer_ptr_and_len();
-                let has_op = buffer.reborrow().has_pending_operation();
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
 
-                buffer.reborrow().cleanup_operation();
+                let ptr = value.reborrow().get_ptr();
+                let has_op = value.reborrow().has_pending_operation();
 
-                let (ptr2, len2) = buffer.reborrow().get_buffer_ptr_and_len();
-                let has_op2 = buffer.reborrow().has_pending_operation();
+                value.reborrow().cleanup_operation();
+
+                let ptr2 = value.reborrow().get_ptr();
+                let has_op2 = value.reborrow().has_pending_operation();
 
                 assert_eq!(ptr, ptr2);
-                assert_eq!(len, len2);
                 assert_eq!(has_op, has_op2);
             }
 
             #[async_std::test]
             async fn does_make_sure_the_operation_completed_without_moving() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (_op, mock) = mock_operation(buffer.reborrow()).await;
-                let op_int_addr = buffer
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (_op, mock) = mock_operation(value.reborrow()).await;
+                let op_int_addr = value
                     .operation_interaction()
                     .map(|pin| pin.get_ref() as *const _)
                     .unwrap();
-                buffer.reborrow().cleanup_operation();
+                value.reborrow().cleanup_operation();
                 mock.assert_op_int_addr_eq(op_int_addr);
             }
 
             #[async_std::test]
             async fn does_drop_the_operation_in_place() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (_op, mock) = mock_operation(buffer.reborrow()).await;
-                let op_int_addr = buffer
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (_op, mock) = mock_operation(value.reborrow()).await;
+                let op_int_addr = value
                     .reborrow()
                     .operation_interaction()
                     .map(|pin| pin.get_ref() as *const _)
                     .unwrap();
-                buffer.reborrow().cleanup_operation();
+                value.reborrow().cleanup_operation();
                 mock.assert_op_int_addr_eq(op_int_addr);
                 mock.assert_was_dropped();
             }
@@ -1334,14 +1301,12 @@ mod tests {
             async fn return_the_right_pointer_and_len() {
                 let mut buffer = [0u8; 32];
                 let buffer = &mut buffer;
-                let buff_ptr = buffer as *mut _ as *mut u8;
-                let buff_len = buffer.len();
+                let buff_ptr = buffer as *mut _;
 
-                let mut anchor = unsafe { EABufferAnchor::<_, OpIntMock>::new_unchecked(buffer) };
-                let anchor = unsafe { EABufferHandle::new_unchecked(&mut anchor) };
+                let mut anchor = unsafe { StackAnchor::<[u8], OpIntMock>::new_unchecked(buffer as _) };
+                let anchor = unsafe { StackValueHandle::new_unchecked(&mut anchor) };
 
-                let (ptr, len) = anchor.get_buffer_ptr_and_len();
-                assert_eq!(len, buff_len);
+                let ptr = anchor.get_ptr();
                 assert_eq!(ptr, buff_ptr);
             }
         }
@@ -1352,12 +1317,12 @@ mod tests {
 
             #[async_std::test]
             async fn returns_true_if_there_is_a_not_cleaned_up_operation() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                assert!(not(buffer.reborrow().has_pending_operation()));
-                let (op, _mock) = mock_operation(buffer.reborrow()).await;
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                assert!(not(value.reborrow().has_pending_operation()));
+                let (op, _mock) = mock_operation(value.reborrow()).await;
                 assert!(op.anchor.has_pending_operation());
                 op.cancellation().await;
-                assert!(not(buffer.reborrow().has_pending_operation()));
+                assert!(not(value.reborrow().has_pending_operation()));
             }
         }
 
@@ -1367,10 +1332,10 @@ mod tests {
 
             #[async_std::test]
             async fn awaits_the_poll_request_cancellation_function_on_the_op_int_instance() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.reborrow()).await;
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (_, mock) = mock_operation(value.reborrow()).await;
                 mock.assert_not_run();
-                buffer.request_cancellation().await;
+                value.request_cancellation().await;
                 mock.assert_notify_cancel_run();
             }
         }
@@ -1381,29 +1346,29 @@ mod tests {
 
             #[async_std::test]
             async fn polls_op_int_poll_completion() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.reborrow()).await;
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (_, mock) = mock_operation(value.reborrow()).await;
                 mock.assert_not_run();
-                buffer.completion().await;
+                value.completion().await;
                 mock.assert_completion_run();
             }
 
             #[async_std::test]
             async fn makes_sure_to_make_sure_operation_actually_did_end() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.reborrow()).await;
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (_, mock) = mock_operation(value.reborrow()).await;
                 mock.assert_not_run();
-                buffer.completion().await;
+                value.completion().await;
                 mock.assert_completion_run();
                 mock.assert_op_ended_enforced()
             }
 
             #[async_std::test]
             async fn makes_sure_to_clean_up_after_completion() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.reborrow()).await;
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (_, mock) = mock_operation(value.reborrow()).await;
                 mock.assert_not_run();
-                buffer.completion().await;
+                value.completion().await;
                 mock.assert_was_dropped();
             }
         }
@@ -1414,27 +1379,27 @@ mod tests {
 
             #[async_std::test]
             async fn polls_op_int_poll_request_cancellation_and_complete() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.reborrow()).await;
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (_, mock) = mock_operation(value.reborrow()).await;
                 mock.assert_not_run();
-                buffer.cancellation().await;
+                value.cancellation().await;
                 mock.assert_cancellation_run();
             }
 
             #[async_std::test]
             async fn makes_sure_that_operation_ended() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.reborrow()).await;
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (_, mock) = mock_operation(value.reborrow()).await;
                 mock.assert_not_run();
-                buffer.cancellation().await;
+                value.cancellation().await;
                 mock.assert_cancellation_run();
                 mock.assert_op_ended_enforced()
             }
             #[async_std::test]
             async fn makes_sure_to_clean_up() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.reborrow()).await;
-                buffer.cancellation().await;
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (_, mock) = mock_operation(value.reborrow()).await;
+                value.cancellation().await;
                 mock.assert_was_dropped();
             }
         }
@@ -1445,9 +1410,9 @@ mod tests {
 
             #[async_std::test]
             async fn buffer_access_awaits_completion() {
-                ra_buffer!(buffer = [12u32; 32] of OpIntMock);
-                let (_, mock) = mock_operation(buffer.reborrow()).await;
-                let (mut_ref, _) = buffer.get_buffer_after_completion().await;
+                ea_stack_value!(value: StackValueHandle<[u32], OpIntMock> = [12u32; 32]);
+                let (_, mock) = mock_operation(value.reborrow()).await;
+                let (mut_ref, _) = value.access_value_after_completion().await;
                 assert_eq!(mut_ref, &mut [12u32; 32] as &mut [u32]);
                 mock.assert_completion_run();
                 mock.assert_was_dropped();
@@ -1464,8 +1429,8 @@ mod tests {
             // we know this forwards so we only test if it forward to the right place
             #[async_std::test]
             async fn polls_op_int_poll_completion() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (op, mock) = mock_operation(buffer.reborrow()).await;
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (op, mock) = mock_operation(value.reborrow()).await;
                 mock.assert_not_run();
                 op.completion().await;
                 mock.assert_completion_run();
@@ -1479,8 +1444,8 @@ mod tests {
             // we know this forwards so we only test if it forward to the right place
             #[async_std::test]
             async fn polls_op_int_poll_request_cancellation() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (mut op, mock) = mock_operation(buffer.reborrow()).await;
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (mut op, mock) = mock_operation(value.reborrow()).await;
                 mock.assert_not_run();
                 op.request_cancellation().await;
                 mock.assert_notify_cancel_run();
@@ -1494,8 +1459,8 @@ mod tests {
             // we know this forwards so we only test if it forward to the right place
             #[async_std::test]
             async fn polls_op_int_poll_request_cancellation() {
-                ra_buffer!(buffer = [0u8; 32] of OpIntMock);
-                let (op, mock) = mock_operation(buffer.reborrow()).await;
+                ea_stack_value!(value: StackValueHandle<[u8], OpIntMock> = [0u8; 32]);
+                let (op, mock) = mock_operation(value.reborrow()).await;
                 mock.assert_not_run();
                 op.cancellation().await;
                 mock.assert_cancellation_run();

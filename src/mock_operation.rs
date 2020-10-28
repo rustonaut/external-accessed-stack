@@ -12,14 +12,14 @@ use crate::*;
 /// that we return a clone of the `op_int` and don't really
 /// do anything with it (and normally you have a second buffer
 /// or target address or similar).
-pub async fn mock_operation<'a, T>(
-    mut buffer: EABufferHandle<'a, T, OpIntMock>,
+pub async fn mock_operation<'a, T: ?Sized>(
+    mut value: StackValueHandle<'a, T, OpIntMock>,
 ) -> (OperationHandle<'a, T, OpIntMock>, MockInfo) {
-    buffer.cancellation().await;
-    let (buffer_start, len) = buffer.get_buffer_ptr_and_len();
-    let (op_int, start, mock_info) = OpIntMock::new(buffer_start, len);
+    value.cancellation().await;
+    let ptr = value.get_ptr();
+    let (op_int, start, mock_info) = OpIntMock::new(ptr);
     // Safe: We pass in the right opt_int (well as we don't actually access the buffer it kinda doesn't matter)
-    let op_handle = unsafe { buffer.try_register_new_operation(op_int) };
+    let op_handle = unsafe { value.try_register_new_operation(op_int) };
     // Unwrap Safe: We awaited completion
     let op_handle = op_handle.unwrap();
     // we don't do really start anything here but if you do implement a real operation
@@ -34,7 +34,7 @@ pub struct OpIntMock {
 }
 
 impl OpIntMock {
-    pub fn new<T>(_buffer_start: *mut T, _len: usize) -> (Self, impl FnOnce(), MockInfo) {
+    pub fn new<T: ?Sized>(_ptr: *mut T) -> (Self, impl FnOnce(), MockInfo) {
         let mock_info: Rc<RefCell<_>> = Default::default();
         let op_int = OpIntMock {
             mock_info: mock_info.clone(),
